@@ -10,6 +10,7 @@ import (
 
 	"microagent2/internal/config"
 	appcontext "microagent2/internal/context"
+	"microagent2/internal/logstream"
 	"microagent2/internal/memoryclient"
 	"microagent2/internal/messaging"
 	"microagent2/internal/response"
@@ -35,6 +36,8 @@ func main() {
 		logger.Error("failed to connect to Valkey", "error", err)
 		os.Exit(1)
 	}
+
+	logger = logstream.NewLogger("context-manager", client.Redis(), logstream.OptionsFromEnv())
 
 	cfgStore := config.NewStore(client.Redis())
 	chatCfg := config.ResolveChat(ctx, cfgStore)

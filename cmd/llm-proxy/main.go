@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"microagent2/internal/llmproxy"
+	"microagent2/internal/logstream"
 	"microagent2/internal/messaging"
 )
 
@@ -33,6 +34,7 @@ func main() {
 		logger.Error("failed to connect to Valkey", "error", err)
 		os.Exit(1)
 	}
+	logger = logstream.NewLogger("llm-proxy", client.Redis(), logstream.OptionsFromEnv())
 
 	srv := llmproxy.New(client, llmproxy.Config{
 		Identity:       identity,

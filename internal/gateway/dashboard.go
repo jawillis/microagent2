@@ -38,6 +38,31 @@ func buildBuiltinPanels() []builtinPanel {
 			ServiceID:  "gateway",
 			Descriptor: systemPanelDescriptor(),
 		},
+		{
+			ServiceID:  "gateway",
+			Descriptor: logsPanelDescriptor(),
+		},
+	}
+}
+
+func logsPanelDescriptor() *dashboard.PanelDescriptor {
+	order := 85
+	return &dashboard.PanelDescriptor{
+		Version: 1,
+		Title:   "Logs",
+		Order:   &order,
+		Sections: []dashboard.Section{
+			{
+				Kind: dashboard.KindLogs,
+				Logs: &dashboard.LogsSection{
+					Title:        "Live Logs",
+					TailURL:      "/v1/logs/tail",
+					HistoryURL:   "/v1/logs/stream",
+					ServicesURL:  "/v1/logs/services",
+					DefaultLevel: "info",
+				},
+			},
+		},
 	}
 }
 

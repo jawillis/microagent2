@@ -12,6 +12,7 @@ import (
 
 	"microagent2/internal/config"
 	"microagent2/internal/gateway"
+	"microagent2/internal/logstream"
 	"microagent2/internal/messaging"
 	"microagent2/internal/response"
 )
@@ -34,6 +35,9 @@ func main() {
 		logger.Error("failed to connect to Valkey", "error", err)
 		os.Exit(1)
 	}
+
+	// Upgrade to stream-aware logger now that Valkey is reachable.
+	logger = logstream.NewLogger("gateway", client.Redis(), logstream.OptionsFromEnv())
 
 	cfgStore := config.NewStore(client.Redis())
 	chatCfg := config.ResolveChat(ctx, cfgStore)
@@ -80,3 +84,4 @@ func envInt(key string, fallback int) int {
 	}
 	return fallback
 }
+

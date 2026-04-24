@@ -98,10 +98,173 @@
       case "form":   return renderFormSection(section);
       case "iframe": return renderIframeSection(section);
       case "status": return renderStatusSection(section);
+      case "logs":   return renderLogsSection(section);
       default:
         var d = el("div", "err", "Unknown section kind: " + section.kind);
         return d;
     }
+  }
+
+  // ---- Logs section ---------------------------------------------------
+  // Live-tail via SSE, with filter controls (service multiselect, level,
+  // correlation_id, free-text). Entries appended in-order; capped at 500
+  // in the DOM (FIFO eviction) to keep long sessions responsive.
+  var LOGS_DOM_CAP = 500;
+
+  function renderLogsSection(section) {
+    var wrap = el("div", "section section-logs");
+    wrap.appendChild(el("h3", null, section.title));
+
+    var controls = el("div", "logs-controls");
+
+    var serviceRow = el("div", "logs-filter-row");
+    serviceRow.appendChild(el("span", "logs-filter-label", "Services:"));
+    var serviceList = el("div", "logs-service-list");
+    serviceRow.appendChild(serviceList);
+    controls.appendChild(serviceRow);
+
+    var filterRow = el("div", "logs-filter-row");
+    var levelLabel = el("label");
+    levelLabel.appendChild(el("span", "logs-filter-label", "Level:"));
+    var levelSel = el("select");
+    ["debug", "info", "warn", "error"].forEach(function (lvl) {
+      var opt = el("option", null, lvl.toUpperCase());
+      opt.value = lvl;
+      if (lvl === (section.default_level || "info")) opt.selected = true;
+      levelSel.appendChild(opt);
+    });
+    levelLabel.appendChild(levelSel);
+    filterRow.appendChild(levelLabel);
+
+    var corrLabel = el("label");
+    corrLabel.appendChild(el("span", "logs-filter-label", "Correlation ID:"));
+    var corrInput = el("input");
+    corrInput.type = "text";
+    corrInput.placeholder = "exact or prefix";
+    corrLabel.appendChild(corrInput);
+    filterRow.appendChild(corrLabel);
+
+    var queryLabel = el("label");
+    queryLabel.appendChild(el("span", "logs-filter-label", "Search:"));
+    var queryInput = el("input");
+    queryInput.type = "text";
+    queryInput.placeholder = "free text";
+    queryLabel.appendChild(queryInput);
+    filterRow.appendChild(queryLabel);
+
+    var autoScrollLabel = el("label", "logs-autoscroll");
+    var autoScroll = el("input");
+    autoScroll.type = "checkbox";
+    autoScroll.checked = true;
+    autoScrollLabel.appendChild(autoScroll);
+    autoScrollLabel.appendChild(el("span", "logs-filter-label", "Auto-scroll"));
+    filterRow.appendChild(autoScrollLabel);
+
+    var status = el("span", "logs-status", "disconnected");
+    filterRow.appendChild(status);
+    controls.appendChild(filterRow);
+
+    wrap.appendChild(controls);
+
+    var list = el("div", "logs-list");
+    wrap.appendChild(list);
+
+    // State for the live feed and filter.
+    var state = {
+      services: [],          // all discovered
+      selected: {},          // service → bool
+      source: null,          // EventSource
+    };
+
+    function reconnect() {
+      if (state.source) {
+        state.source.close();
+        state.source = null;
+      }
+      var params = new URLSearchParams();
+      var svcs = Object.keys(state.selected).filter(function (s) { return state.selected[s]; });
+      if (svcs.length) params.set("services", svcs.join(","));
+      if (levelSel.value) params.set("level", levelSel.value);
+      if (corrInput.value) params.set("correlation_id", corrInput.value);
+      if (queryInput.value) params.set("query", queryInput.value);
+      status.textContent = "connecting…";
+      var src = new EventSource(section.tail_url + "?" + params.toString());
+      src.onopen = function () { status.textContent = "connected"; };
+      src.onerror = function () { status.textContent = "reconnecting…"; };
+      src.onmessage = function (ev) {
+        try {
+          var entry = JSON.parse(ev.data);
+          appendEntry(entry);
+        } catch (_) {}
+      };
+      state.source = src;
+    }
+
+    function appendEntry(e) {
+      var row = el("div", "logs-row logs-level-" + (e.level || "info").toLowerCase());
+      var t = el("span", "logs-time", (e.time || "").slice(11, 23));
+      var lvl = el("span", "logs-level", e.level || "");
+      var svc = el("span", "logs-service", e.service || "");
+      var cid = el("span", "logs-cid", (e.correlation_id || "").slice(0, 8));
+      var msg = el("span", "logs-msg", e.msg || "");
+      row.appendChild(t);
+      row.appendChild(lvl);
+      row.appendChild(svc);
+      row.appendChild(cid);
+      row.appendChild(msg);
+
+      // Expand on click to show raw JSON.
+      var details = el("pre", "logs-raw");
+      try {
+        details.textContent = JSON.stringify(JSON.parse(e.raw), null, 2);
+      } catch (_) {
+        details.textContent = typeof e.raw === "string" ? e.raw : JSON.stringify(e.raw);
+      }
+      details.style.display = "none";
+      row.addEventListener("click", function () {
+        details.style.display = details.style.display === "none" ? "block" : "none";
+      });
+      row.appendChild(details);
+
+      list.appendChild(row);
+      while (list.childNodes.length > LOGS_DOM_CAP) {
+        list.removeChild(list.firstChild);
+      }
+      if (autoScroll.checked) list.scrollTop = list.scrollHeight;
+    }
+
+    // Kick off: fetch discoverable services, render toggles, then connect.
+    api("GET", section.services_url).then(function (data) {
+      state.services = (data && data.services) || [];
+      (section.default_services || state.services).forEach(function (s) { state.selected[s] = true; });
+      // ensure every discovered service has an entry
+      state.services.forEach(function (s) {
+        if (!(s in state.selected)) state.selected[s] = true;
+      });
+      state.services.forEach(function (s) {
+        var chk = el("label", "logs-service-toggle");
+        var box = el("input");
+        box.type = "checkbox";
+        box.checked = !!state.selected[s];
+        box.addEventListener("change", function () {
+          state.selected[s] = box.checked;
+          reconnect();
+        });
+        chk.appendChild(box);
+        chk.appendChild(el("span", null, s));
+        serviceList.appendChild(chk);
+      });
+      reconnect();
+    }).catch(function (err) {
+      status.textContent = "services fetch failed: " + err.message;
+    });
+
+    // Wire filter controls to reconnect.
+    levelSel.addEventListener("change", reconnect);
+    corrInput.addEventListener("change", reconnect);
+    queryInput.addEventListener("change", reconnect);
+
+    return wrap;
   }
 
   function renderFormSection(section) {

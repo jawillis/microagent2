@@ -13,6 +13,7 @@ import (
 
 	"microagent2/internal/agent"
 	"microagent2/internal/config"
+	"microagent2/internal/logstream"
 	"microagent2/internal/mcp"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
@@ -41,6 +42,7 @@ func main() {
 		logger.Error("failed to connect to Valkey", "error", err)
 		os.Exit(1)
 	}
+	logger = logstream.NewLogger("main-agent", client.Redis(), logstream.OptionsFromEnv())
 
 	skillsStore := skills.NewStore(skillsDir, logger)
 	toolRegistry := tools.NewRegistry(logger)

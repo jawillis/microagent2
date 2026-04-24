@@ -18,11 +18,11 @@ func silentLogger() *slog.Logger {
 func TestAggregatePanels_BuiltinsOnly(t *testing.T) {
 	reg := registry.NewRegistry()
 	entries := aggregatePanels(reg)
-	// expect 3 built-ins in explicit order: chat (10), sessions (80), system (90)
-	if len(entries) != 3 {
-		t.Fatalf("got %d entries, want 3", len(entries))
+	// expect 4 built-ins in explicit order: chat (10), sessions (80), logs (85), system (90)
+	if len(entries) != 4 {
+		t.Fatalf("got %d entries, want 4", len(entries))
 	}
-	wantTitles := []string{"Chat", "Sessions", "System"}
+	wantTitles := []string{"Chat", "Sessions", "Logs", "System"}
 	for i, want := range wantTitles {
 		if entries[i].Descriptor.Title != want {
 			t.Errorf("entry[%d] title = %q; want %q", i, entries[i].Descriptor.Title, want)
@@ -44,12 +44,12 @@ func TestAggregatePanels_ServiceContributedSortsAfterBuiltins(t *testing.T) {
 		},
 	})
 	entries := aggregatePanels(reg)
-	if len(entries) != 4 {
-		t.Fatalf("got %d, want 4", len(entries))
+	if len(entries) != 5 {
+		t.Fatalf("got %d, want 5", len(entries))
 	}
-	// Memory (order 200) must sort AFTER Chat(10)/Sessions(80)/System(90)
-	if entries[3].Descriptor.Title != "Memory" {
-		t.Fatalf("last entry title = %q; want Memory", entries[3].Descriptor.Title)
+	// Memory (order 200) must sort AFTER all gateway built-ins (10/80/85/90)
+	if entries[4].Descriptor.Title != "Memory" {
+		t.Fatalf("last entry title = %q; want Memory", entries[4].Descriptor.Title)
 	}
 }
 
@@ -108,8 +108,8 @@ func TestHandleListDashboardPanels_ReturnsBuiltins(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(body.Panels) != 3 {
-		t.Fatalf("got %d panels, want 3", len(body.Panels))
+	if len(body.Panels) != 4 {
+		t.Fatalf("got %d panels, want 4", len(body.Panels))
 	}
 	for _, p := range body.Panels {
 		if p.ServiceID != "gateway" {

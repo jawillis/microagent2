@@ -8,6 +8,7 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // CurrentDescriptorVersion is the latest descriptor schema version this
@@ -29,6 +30,7 @@ const (
 	KindForm   SectionKind = "form"
 	KindIframe SectionKind = "iframe"
 	KindStatus SectionKind = "status"
+	KindLogs   SectionKind = "logs"
 )
 
 // FieldType enumerates the closed set of form-field types supported by
@@ -69,6 +71,7 @@ type Section struct {
 	Form   *FormSection
 	Iframe *IframeSection
 	Status *StatusSection
+	Logs   *LogsSection
 }
 
 // FormSection declares a config form backed by the gateway's existing
@@ -93,6 +96,19 @@ type StatusSection struct {
 	Title  string       `json:"title"`
 	URL    string       `json:"url"`
 	Layout StatusLayout `json:"layout"`
+}
+
+// LogsSection declares a live-tailing log viewer. The dashboard opens
+// an EventSource to TailURL and fetches HistoryURL for initial context;
+// ServicesURL returns the list of discoverable services for the
+// filter UI.
+type LogsSection struct {
+	Title           string   `json:"title"`
+	TailURL         string   `json:"tail_url"`
+	HistoryURL      string   `json:"history_url"`
+	ServicesURL     string   `json:"services_url"`
+	DefaultServices []string `json:"default_services,omitempty"`
+	DefaultLevel    string   `json:"default_level,omitempty"`
 }
 
 // FieldSchema declares a single form field's type and constraints.
@@ -159,11 +175,39 @@ func validateSection(s Section) error {
 			return fmt.Errorf("kind=status requires status body")
 		}
 		return validateStatus(s.Status)
+	case KindLogs:
+		if s.Logs == nil {
+			return fmt.Errorf("kind=logs requires logs body")
+		}
+		return validateLogs(s.Logs)
 	case "":
 		return fmt.Errorf("section kind is required")
 	default:
 		return fmt.Errorf("unknown section kind %q", s.Kind)
 	}
+}
+
+func validateLogs(l *LogsSection) error {
+	if l.Title == "" {
+		return fmt.Errorf("logs.title is required")
+	}
+	if l.TailURL == "" {
+		return fmt.Errorf("logs.tail_url is required")
+	}
+	if l.HistoryURL == "" {
+		return fmt.Errorf("logs.history_url is required")
+	}
+	if l.ServicesURL == "" {
+		return fmt.Errorf("logs.services_url is required")
+	}
+	if l.DefaultLevel != "" {
+		switch strings.ToLower(l.DefaultLevel) {
+		case "debug", "info", "warn", "error":
+		default:
+			return fmt.Errorf("logs.default_level must be one of debug|info|warn|error; got %q", l.DefaultLevel)
+		}
+	}
+	return nil
 }
 
 func validateForm(f *FormSection) error {
@@ -283,6 +327,14 @@ func (s Section) MarshalJSON() ([]byte, error) {
 			Kind SectionKind `json:"kind"`
 			*StatusSection
 		}{Kind: s.Kind, StatusSection: s.Status})
+	case KindLogs:
+		if s.Logs == nil {
+			return nil, fmt.Errorf("section kind=logs with nil body")
+		}
+		return json.Marshal(struct {
+			Kind SectionKind `json:"kind"`
+			*LogsSection
+		}{Kind: s.Kind, LogsSection: s.Logs})
 	default:
 		return nil, fmt.Errorf("unknown section kind %q", s.Kind)
 	}
@@ -313,6 +365,12 @@ func (s *Section) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		s.Status = &body
+	case KindLogs:
+		var body LogsSection
+		if err := json.Unmarshal(data, &body); err != nil {
+			return err
+		}
+		s.Logs = &body
 	case "":
 		return fmt.Errorf("section missing kind")
 	default:

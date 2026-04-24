@@ -12,6 +12,7 @@ import (
 
 	"microagent2/internal/broker"
 	"microagent2/internal/config"
+	"microagent2/internal/logstream"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
 )
@@ -33,6 +34,7 @@ func main() {
 		logger.Error("failed to connect to Valkey", "error", err)
 		os.Exit(1)
 	}
+	logger = logstream.NewLogger("llm-broker", client.Redis(), logstream.OptionsFromEnv())
 
 	cfgStore := config.NewStore(client.Redis())
 	brokerCfg := config.ResolveBroker(ctx, cfgStore)

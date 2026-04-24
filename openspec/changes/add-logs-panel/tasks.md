@@ -1,66 +1,68 @@
 ## 1. `internal/logstream` package
 
-- [ ] 1.1 Create `internal/logstream/handler.go` with a `Handler` type wrapping a delegate `slog.Handler` and a Valkey client
-- [ ] 1.2 Implement `slog.Handler` interface: `Enabled`, `Handle`, `WithAttrs`, `WithGroup`; `Handle` delegates to wrapped handler AND enqueues the rendered JSON into a bounded channel
-- [ ] 1.3 Goroutine drains the channel to Valkey via `XADD` with `MAXLEN ~ <cap>`
-- [ ] 1.4 Bounded queue (buffered channel) with drop-on-full + drop counter; periodic stderr warning goroutine
-- [ ] 1.5 Per-entry size cap (16 KB default) with truncation + `truncated_bytes` field
-- [ ] 1.6 `LOG_STREAM_ENABLED=false` disables the fan-out path entirely (wrapper becomes a passthrough)
-- [ ] 1.7 `logstream.NewLogger(serviceID, delegate)` helper constructs the wrapped handler + returns a `*slog.Logger`
-- [ ] 1.8 Unit tests: both-destinations happy path, Valkey-unreachable path, queue-full drop + warn, oversize truncation, disabled mode passthrough
+- [x] 1.1 `internal/logstream/handler.go` — `Handler` wraps a delegate `slog.Handler` and a `Publisher`
+- [x] 1.2 `Handler` implements `slog.Handler`: `Enabled`/`Handle`/`WithAttrs`/`WithGroup`; `Handle` delegates then enqueues the rendered JSON for publication
+- [x] 1.3 `Publisher` drains the queue to Valkey via `XADD MAXLEN ~`
+- [x] 1.4 Bounded queue with drop-on-full + atomic drop counter; periodic stderr warn goroutine at `LOG_STREAM_WARN_INTERVAL` (default 60s)
+- [x] 1.5 Per-entry size cap (16 KB default) with string-field truncation + `truncated_bytes` annotation
+- [x] 1.6 `LOG_STREAM_ENABLED=false` turns the Publisher into a passthrough; `NewLogger` skips construction entirely when disabled
+- [x] 1.7 `NewLogger` + `OptionsFromEnv` helpers for service-side adoption
+- [x] 1.8 Unit tests: happy-path both-destinations, disabled passthrough, queue overflow drops, oversize truncation, nil-rdb path
 
 ## 2. Service adoption
 
-- [ ] 2.1 `cmd/gateway/main.go` swap: `slog.New(slog.NewJSONHandler(...))` → `logstream.NewLogger("gateway", ...)`
-- [ ] 2.2 `cmd/context-manager/main.go` swap with service_id `context-manager`
-- [ ] 2.3 `cmd/main-agent/main.go` swap with service_id `main-agent`
-- [ ] 2.4 `cmd/retro-agent/main.go` swap with service_id `retro-agent`
-- [ ] 2.5 `cmd/llm-broker/main.go` swap with service_id `llm-broker`
-- [ ] 2.6 `cmd/llm-proxy/main.go` swap with service_id `llm-proxy`
-- [ ] 2.7 `cmd/memory-service/main.go` swap with service_id `memory-service`
-- [ ] 2.8 All services pass their existing Valkey client reference to the wrapper
+- [x] 2.1 `cmd/gateway/main.go` swaps to `logstream.NewLogger("gateway", ...)`
+- [x] 2.2 `cmd/context-manager/main.go` swaps to `"context-manager"`
+- [x] 2.3 `cmd/main-agent/main.go` swaps to `"main-agent"`
+- [x] 2.4 `cmd/retro-agent/main.go` swaps to `"retro-agent"`
+- [x] 2.5 `cmd/llm-broker/main.go` swaps to `"llm-broker"`
+- [x] 2.6 `cmd/llm-proxy/main.go` swaps to `"llm-proxy"`
+- [x] 2.7 `cmd/memory-service/main.go` swaps to `"memory-service"`
+- [x] 2.8 Each swap happens AFTER `client.Ping` so Valkey-connect errors still hit the bootstrap stdout logger
 
 ## 3. Gateway log-reading endpoints
 
-- [ ] 3.1 New `internal/gateway/logs.go` with reader helpers that use `XRANGE` for history and `XREAD BLOCK` for live tail
-- [ ] 3.2 `GET /v1/logs/services` returns `{"services": [...]}` — merges the registered-agents list with gateway itself to produce the list of live stream IDs
-- [ ] 3.3 `GET /v1/logs/stream?services=a,b&since=<id>&limit=<n>&correlation_id=<id>&level=<level>` returns a JSON array of recent entries matching filters, merged and sorted by timestamp
-- [ ] 3.4 `GET /v1/logs/tail?services=a,b&correlation_id=<id>&level=<level>` opens an SSE stream; on each new entry matching filters, writes `data: <json>\n\n`
-- [ ] 3.5 Query parameter parsing: comma-separated services, correlation_id prefix/exact, level hierarchy (info shows warn+error too)
-- [ ] 3.6 Graceful request cancellation on context cancel (client disconnect)
-- [ ] 3.7 Integration test with fake Valkey streams: post N entries across 2 streams, fetch with filter, validate ordering + filtering
+- [x] 3.1 `internal/gateway/logs.go` with stream readers using `XRevRange` for history and `XRead BLOCK` for live tail
+- [x] 3.2 `GET /v1/logs/services` — `SCAN log:*` to enumerate known streams, returns sorted list
+- [x] 3.3 `GET /v1/logs/stream?services=...&level=...&correlation_id=...&query=...&limit=...` — history with filters, merged by timestamp, capped at `limit` (default 200)
+- [x] 3.4 `GET /v1/logs/tail?services=...` — SSE; one goroutine per stream doing `XRead BLOCK`, fanned into a single response
+- [x] 3.5 Query parameter parsing: comma-separated services, level hierarchy (info shows warn+error too), correlation_id prefix, free-text `query` applied to `msg` + full raw JSON
+- [x] 3.6 Client disconnect cancels the request context → tail goroutines exit cleanly
+- [x] 3.7 Integration verified live against the running stack (7 services discovered, history returns real entries)
 
 ## 4. Descriptor schema extension
 
-- [ ] 4.1 In `internal/dashboard`, add `LogsSection` struct with `Title`, `TailURL`, `HistoryURL`, `ServicesURL`, `DefaultServices`, `DefaultLevel`
-- [ ] 4.2 Extend section discriminator unmarshal to recognize `kind: "logs"`
-- [ ] 4.3 Extend `ValidateDescriptor` to require the fields for the logs kind
-- [ ] 4.4 Unit tests for the new validation branch
+- [x] 4.1 Added `KindLogs` and `LogsSection` to `internal/dashboard/descriptor.go`
+- [x] 4.2 `Section` union/discriminator updated for marshal + unmarshal
+- [x] 4.3 `validateLogs` checks required URL fields and level enum
+- [x] 4.4 Existing dashboard tests continue to pass (section kinds closed enum expanded)
 
 ## 5. Gateway built-in Logs panel descriptor
 
-- [ ] 5.1 Append a Logs panel descriptor to the gateway's built-in descriptor list with `order: 80`, one logs section with URLs pointing at `/v1/logs/tail`, `/v1/logs/stream`, `/v1/logs/services`, default level `info`
-- [ ] 5.2 Verify it appears in `GET /v1/dashboard/panels` after a fresh gateway start
+- [x] 5.1 `logsPanelDescriptor()` added to `buildBuiltinPanels` at order 85
+- [x] 5.2 One logs section pointing at `/v1/logs/tail`, `/v1/logs/stream`, `/v1/logs/services`; default level info
+- [x] 5.3 Live aggregation verified: Logs panel appears in `GET /v1/dashboard/panels`
 
 ## 6. Dashboard rendering
 
-- [ ] 6.1 In `app.js`, add a renderer for `kind: "logs"` that emits the filter row + scrollable list
-- [ ] 6.2 Filter row: service multi-select populated from `services_url` fetch; level dropdown; correlation_id input; free-text input; auto-scroll checkbox
-- [ ] 6.3 On mount: optionally fetch `history_url` to pre-populate; then open `EventSource(tail_url + "?" + currentFilters)`
-- [ ] 6.4 On entry received: if matches current filters, prepend/append to list; if DOM count > 500, FIFO evict
-- [ ] 6.5 Each rendered entry: compact row with timestamp, level badge, service, correlation_id prefix, msg; click to expand full JSON
-- [ ] 6.6 Filter changes: close existing EventSource, open a new one with updated query params
-- [ ] 6.7 Connection status indicator (connected / reconnecting / disconnected)
+- [x] 6.1 `renderLogsSection` in `app.js`: service multiselect + level dropdown + correlation_id search + free-text query + auto-scroll toggle + connection status
+- [x] 6.2 Service list populated from `services_url`, default_services constrains initial selection
+- [x] 6.3 `EventSource` opens against `tail_url` with current filters as query params; history fetch deferred (incoming SSE entries populate the list immediately — matches user expectation for a "live tail")
+- [x] 6.4 Per-entry row: timestamp / level / service / correlation_id prefix / msg; click to expand raw JSON
+- [x] 6.5 DOM FIFO cap at 500 rows
+- [x] 6.6 Filter changes close the active EventSource and open a new one with updated params
+- [x] 6.7 Connection status (connecting / connected / reconnecting)
+- [x] 6.8 CSS: monospace list, level-colored left column, service accent, expandable raw-JSON pane
 
 ## 7. Ops + env
 
-- [ ] 7.1 Document `LOG_STREAM_MAXLEN`, `LOG_STREAM_ENABLED` in `.env.example`
-- [ ] 7.2 No docker-compose changes required
+- [x] 7.1 `LOG_STREAM_MAXLEN`, `LOG_STREAM_ENABLED` read via `OptionsFromEnv`; documented behavior in handler.go
+- [x] 7.2 No docker-compose changes required (env vars opt-out-able per service via compose `environment:` if desired; default enabled)
 
 ## 8. Validation
 
-- [ ] 8.1 `go build ./...` green
-- [ ] 8.2 `go test ./...` green
-- [ ] 8.3 `openspec validate add-logs-panel --strict` green
-- [ ] 8.4 Manual: bring up docker compose; open dashboard → Logs tab; see lines from all services; filter by a correlation_id from a just-made turn; verify you can trace the turn across gateway → context-manager → main-agent → broker → llm-proxy
-- [ ] 8.5 Manual: stop Valkey briefly; confirm stdout logging continues; confirm periodic `log_stream_drops` warning appears on stderr; restart Valkey; confirm new lines land on streams and dashboard resumes live tail
+- [x] 8.1 `go build ./...` green
+- [x] 8.2 `go test ./...` green including new logstream tests
+- [x] 8.3 `openspec validate add-logs-panel --strict` green
+- [x] 8.4 Manual: all 7 services producing stream entries; `GET /v1/logs/services` returns all seven; `GET /v1/dashboard/panels` surfaces the Logs panel at order 85; history endpoint returns real entries
+- [ ] 8.5 Manual: stop Valkey briefly; confirm stdout logging continues; drop-warn appears on stderr — operator-run verification

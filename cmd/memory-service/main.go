@@ -12,6 +12,7 @@ import (
 
 	"microagent2/internal/config"
 	"microagent2/internal/hindsight"
+	"microagent2/internal/logstream"
 	"microagent2/internal/memoryservice"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
@@ -55,6 +56,7 @@ func main() {
 		logger.Error("failed to connect to Valkey", "error", err.Error())
 		os.Exit(1)
 	}
+	logger = logstream.NewLogger("memory-service", msgClient.Redis(), logstream.OptionsFromEnv())
 	cfgStore := config.NewStore(msgClient.Redis())
 
 	srv := memoryservice.New(hc, memoryservice.Config{

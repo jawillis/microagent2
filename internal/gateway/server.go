@@ -67,6 +67,9 @@ func New(client *messaging.Client, logger *slog.Logger, configStore *config.Stor
 	s.mux.HandleFunc("POST /v1/mcp/servers", s.handleAddMCPServer)
 	s.mux.HandleFunc("DELETE /v1/mcp/servers/{name}", s.handleDeleteMCPServer)
 	s.mux.HandleFunc("GET /v1/dashboard/panels", s.handleListDashboardPanels)
+	s.mux.HandleFunc("GET /v1/logs/services", s.handleListLogServices)
+	s.mux.HandleFunc("GET /v1/logs/stream", s.handleLogHistory)
+	s.mux.HandleFunc("GET /v1/logs/tail", s.handleLogTail)
 
 	webFS, _ := fs.Sub(webFiles, "web")
 	s.mux.Handle("GET /", http.FileServer(http.FS(webFS)))
