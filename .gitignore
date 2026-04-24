@@ -1,0 +1,11 @@
+.env
+*.exe
+*.test
+*.out
+/bin/
+/tmp/
+/context-manager
+/gateway
+/llm-broker
+/main-agent
+/retro-agent

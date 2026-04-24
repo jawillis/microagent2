@@ -1,0 +1,104 @@
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "${VALKEY_PORT:-6379}:6379"
+    volumes:
+      - valkey-data:/data
+    command: valkey-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - microagent
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gateway
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - GATEWAY_PORT=8080
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - microagent
+
+  context-manager:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.context-manager
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - MUNINNDB_ADDR=${MUNINNDB_ADDR:-host.docker.internal:8100}
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a helpful assistant.}
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - microagent
+
+  llm-broker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.llm-broker
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - LLAMA_SERVER_ADDR=${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
+      - SLOT_COUNT=${SLOT_COUNT:-4}
+      - PREEMPT_TIMEOUT_MS=${PREEMPT_TIMEOUT_MS:-5000}
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - microagent
+
+  main-agent:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.main-agent
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - AGENT_ID=main-agent
+      - AGENT_PRIORITY=0
+      - AGENT_PREEMPTIBLE=false
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
+    depends_on:
+      valkey:
+        condition: service_healthy
+      llm-broker:
+        condition: service_started
+    networks:
+      - microagent
+
+  retro-agent:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.retro-agent
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - MUNINNDB_ADDR=${MUNINNDB_ADDR:-host.docker.internal:8100}
+      - AGENT_ID=retro-agent
+      - AGENT_PRIORITY=1
+      - AGENT_PREEMPTIBLE=true
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
+      - INACTIVITY_TIMEOUT_S=${INACTIVITY_TIMEOUT_S:-300}
+    depends_on:
+      valkey:
+        condition: service_healthy
+      llm-broker:
+        condition: service_started
+    networks:
+      - microagent
+
+networks:
+  microagent:
+    driver: bridge
+
+volumes:
+  valkey-data:
