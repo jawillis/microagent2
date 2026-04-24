@@ -15,10 +15,12 @@ type Manifest struct {
 	Model        string
 	body         string
 	sourcePath   string
+	rootDir      string
 }
 
 func (m *Manifest) Body() string       { return m.body }
 func (m *Manifest) SourcePath() string { return m.sourcePath }
+func (m *Manifest) Root() string       { return m.rootDir }
 
 type frontmatterFields struct {
 	Name         string   `yaml:"name"`

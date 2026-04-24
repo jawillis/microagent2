@@ -72,12 +72,43 @@ func (r *Registry) register(t Tool) error {
 	return nil
 }
 
+// Schemas returns every registered tool's schema in registration order.
+// Callers that want to filter by active skill should prefer SchemasFor.
 func (r *Registry) Schemas() []messaging.ToolSchema {
 	out := make([]messaging.ToolSchema, 0, len(r.order))
 	for _, name := range r.order {
 		out = append(out, r.tools[name].Schema())
 	}
 	return out
+}
+
+// SchemasFor returns schemas for the union of `base` and `allowed` — the
+// set of tool names visible under the current active skill. Names not
+// registered are silently ignored; the returned slice preserves registration
+// order (not argument order). Deduplication happens via set membership.
+func (r *Registry) SchemasFor(base []string, allowed []string) []messaging.ToolSchema {
+	visible := make(map[string]struct{}, len(base)+len(allowed))
+	for _, n := range base {
+		visible[n] = struct{}{}
+	}
+	for _, n := range allowed {
+		visible[n] = struct{}{}
+	}
+	out := make([]messaging.ToolSchema, 0, len(visible))
+	for _, name := range r.order {
+		if _, ok := visible[name]; !ok {
+			continue
+		}
+		out = append(out, r.tools[name].Schema())
+	}
+	return out
+}
+
+// Has reports whether a tool with the given name is registered. Callers
+// use this to pre-validate a visible set before calling Invoke.
+func (r *Registry) Has(name string) bool {
+	_, ok := r.tools[name]
+	return ok
 }
 
 func (r *Registry) Manifest() []ManifestEntry {

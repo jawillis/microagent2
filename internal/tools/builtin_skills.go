@@ -79,3 +79,46 @@ func (t *readSkillTool) Invoke(ctx context.Context, argsJSON string) (string, er
 	}
 	return body, nil
 }
+
+type readSkillFileTool struct {
+	store *skills.Store
+}
+
+func NewReadSkillFile(store *skills.Store) Tool { return &readSkillFileTool{store: store} }
+
+func (t *readSkillFileTool) Name() string { return "read_skill_file" }
+
+func (t *readSkillFileTool) Schema() messaging.ToolSchema {
+	params := json.RawMessage(`{"type":"object","properties":{"skill":{"type":"string","description":"Exact skill name as returned by list_skills"},"path":{"type":"string","description":"Relative path within the skill directory, e.g. reference/best_practices.md"}},"required":["skill","path"]}`)
+	return messaging.ToolSchema{
+		Type: "function",
+		Function: messaging.ToolFunction{
+			Name:        "read_skill_file",
+			Description: "Read a supplementary file (e.g. reference/, examples/) from within a skill's directory. Use this to follow progressive-disclosure pointers in a skill's body. The path MUST be relative to the skill root; absolute paths, traversal (..), and SKILL.md (use read_skill) are rejected.",
+			Parameters:  params,
+		},
+	}
+}
+
+func (t *readSkillFileTool) Invoke(ctx context.Context, argsJSON string) (string, error) {
+	var args struct {
+		Skill string `json:"skill"`
+		Path  string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return jsonError(fmt.Sprintf("invalid arguments: %s", err.Error())), nil
+	}
+	skill := strings.TrimSpace(args.Skill)
+	path := strings.TrimSpace(args.Path)
+	if skill == "" || path == "" {
+		return jsonError("skill and path arguments are required"), nil
+	}
+	body, found, err := t.store.ReadFile(skill, path)
+	if err != nil {
+		return jsonError(err.Error()), nil
+	}
+	if !found {
+		return jsonError(fmt.Sprintf("skill not found: %s", skill)), nil
+	}
+	return body, nil
+}

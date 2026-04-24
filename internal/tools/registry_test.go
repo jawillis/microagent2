@@ -134,3 +134,112 @@ func TestRegistry_SuccessfulInvocation(t *testing.T) {
 		t.Fatalf("outcome: %q", res.Outcome)
 	}
 }
+
+// ---- Added for skills-tool-gating ----
+
+func TestSchemasFor_EmptyBaseEmptyAllowedReturnsNothing(t *testing.T) {
+	r := NewRegistry(silent())
+	_ = r.Register(&fakeTool{name: "a"})
+	_ = r.Register(&fakeTool{name: "b"})
+	got := r.SchemasFor(nil, nil)
+	if len(got) != 0 {
+		t.Fatalf("got %d schemas, want 0", len(got))
+	}
+}
+
+func TestSchemasFor_BaseOnly(t *testing.T) {
+	r := NewRegistry(silent())
+	for _, n := range []string{"a", "b", "c"} {
+		_ = r.Register(&fakeTool{name: n})
+	}
+	got := r.SchemasFor([]string{"a", "c"}, nil)
+	if len(got) != 2 || got[0].Function.Name != "a" || got[1].Function.Name != "c" {
+		t.Fatalf("got %+v", names(got))
+	}
+}
+
+func TestSchemasFor_BaseUnionAllowed(t *testing.T) {
+	r := NewRegistry(silent())
+	for _, n := range []string{"a", "b", "c", "d"} {
+		_ = r.Register(&fakeTool{name: n})
+	}
+	got := r.SchemasFor([]string{"a"}, []string{"c", "d"})
+	if want := []string{"a", "c", "d"}; !equalNames(got, want) {
+		t.Fatalf("got %v, want %v", names(got), want)
+	}
+}
+
+func TestSchemasFor_OverlappingDeduplicates(t *testing.T) {
+	r := NewRegistry(silent())
+	for _, n := range []string{"a", "b", "c"} {
+		_ = r.Register(&fakeTool{name: n})
+	}
+	got := r.SchemasFor([]string{"a", "b"}, []string{"b", "c"})
+	if want := []string{"a", "b", "c"}; !equalNames(got, want) {
+		t.Fatalf("got %v, want %v", names(got), want)
+	}
+}
+
+func TestSchemasFor_UnknownNamesIgnored(t *testing.T) {
+	r := NewRegistry(silent())
+	_ = r.Register(&fakeTool{name: "real"})
+	got := r.SchemasFor([]string{"real", "phantom"}, []string{"also-missing"})
+	if want := []string{"real"}; !equalNames(got, want) {
+		t.Fatalf("got %v, want %v", names(got), want)
+	}
+}
+
+func TestSchemasFor_PreservesRegistrationOrder(t *testing.T) {
+	r := NewRegistry(silent())
+	for _, n := range []string{"A", "B", "C", "D", "E"} {
+		_ = r.Register(&fakeTool{name: n})
+	}
+	// Arguments in deliberately scrambled order; output must follow registration order.
+	got := r.SchemasFor([]string{"E"}, []string{"C", "A", "D"})
+	if want := []string{"A", "C", "D", "E"}; !equalNames(got, want) {
+		t.Fatalf("got %v, want %v", names(got), want)
+	}
+}
+
+func TestSchemasFor_DoesNotModifySchemas(t *testing.T) {
+	r := NewRegistry(silent())
+	for _, n := range []string{"a", "b", "c"} {
+		_ = r.Register(&fakeTool{name: n})
+	}
+	full := r.Schemas()
+	_ = r.SchemasFor([]string{"a"}, nil)
+	if got := r.Schemas(); len(got) != len(full) {
+		t.Fatalf("Schemas() changed from %d to %d", len(full), len(got))
+	}
+}
+
+func TestRegistry_HasDetectsRegistered(t *testing.T) {
+	r := NewRegistry(silent())
+	_ = r.Register(&fakeTool{name: "here"})
+	if !r.Has("here") {
+		t.Fatal("Has(here) should be true")
+	}
+	if r.Has("absent") {
+		t.Fatal("Has(absent) should be false")
+	}
+}
+
+func names(s []messaging.ToolSchema) []string {
+	out := make([]string, len(s))
+	for i, sc := range s {
+		out[i] = sc.Function.Name
+	}
+	return out
+}
+
+func equalNames(got []messaging.ToolSchema, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i, n := range want {
+		if got[i].Function.Name != n {
+			return false
+		}
+	}
+	return true
+}

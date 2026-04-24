@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,15 +12,33 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"microagent2/internal/agent"
 	"microagent2/internal/config"
 	"microagent2/internal/logstream"
 	"microagent2/internal/mcp"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
+	"microagent2/internal/sessionskill"
 	"microagent2/internal/skills"
 	"microagent2/internal/tools"
 )
+
+const activeSkillTTL = 24 * time.Hour
+
+// requestDeps bundles the per-request dependencies so handleRequest's signature
+// stays readable after session-state plumbing landed.
+type requestDeps struct {
+	client    *messaging.Client
+	runtime   *agent.Runtime
+	registry  *tools.Registry
+	store     *skills.Store
+	rdb       *redis.Client
+	baseTools []string
+	maxIter   int
+	logger    *slog.Logger
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -54,11 +73,26 @@ func main() {
 		logger.Error("register read_skill", "error", err)
 		os.Exit(1)
 	}
+	if err := toolRegistry.Register(tools.NewReadSkillFile(skillsStore)); err != nil {
+		logger.Error("register read_skill_file", "error", err)
+		os.Exit(1)
+	}
+	if err := toolRegistry.Register(tools.NewCurrentTime()); err != nil {
+		logger.Error("register current_time", "error", err)
+		os.Exit(1)
+	}
 
 	cfgStore := config.NewStore(client.Redis())
 	mcpServers := config.ResolveMCPServers(ctx, cfgStore, logger)
 	mcpMgr := mcp.NewManager(client.Redis(), logger)
 	mcpMgr.Start(ctx, mcpServers, toolRegistry)
+
+	// Base toolset = everything registered after MCP start. Stable for the
+	// process lifetime; a skill's allowed-tools expands visibility on top.
+	baseTools := make([]string, 0, len(toolRegistry.Manifest()))
+	for _, m := range toolRegistry.Manifest() {
+		baseTools = append(baseTools, m.Name)
+	}
 
 	reg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{
 		AgentID:             agentID,
@@ -86,29 +120,44 @@ func main() {
 	group := fmt.Sprintf(messaging.ConsumerGroupAgent, agentID)
 	consumer := "worker"
 
-	logger.Info("main agent ready, consuming requests", "skills_dir", skillsDir, "tool_loop_max_iter", maxIter)
+	logger.Info("main agent ready, consuming requests", "skills_dir", skillsDir, "tool_loop_max_iter", maxIter, "base_tools", baseTools)
+
+	deps := &requestDeps{
+		client:    client,
+		runtime:   rt,
+		registry:  toolRegistry,
+		store:     skillsStore,
+		rdb:       client.Redis(),
+		baseTools: baseTools,
+		maxIter:   maxIter,
+		logger:    logger,
+	}
 
 	if err := client.ConsumeStream(ctx, stream, group, consumer, 1, 2*time.Second,
 		func(ctx context.Context, msg *messaging.Message) error {
-			handleRequest(ctx, client, rt, toolRegistry, skillsStore, maxIter, msg, logger)
+			handleRequest(ctx, deps, msg)
 			return nil
 		}, logger, nil); err != nil && err != context.Canceled {
 		logger.Error("consume stream exited", "error", err)
 	}
 }
 
-func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runtime, toolRegistry *tools.Registry, skillsStore *skills.Store, maxIter int, msg *messaging.Message, logger *slog.Logger) {
+func handleRequest(ctx context.Context, d *requestDeps, msg *messaging.Message) {
 	var payload messaging.ContextAssembledPayload
 	if err := msg.DecodePayload(&payload); err != nil {
-		logger.Error("failed to decode context assembled message", "error", err)
+		d.logger.Error("failed to decode context assembled message", "error", err)
 		return
 	}
 
 	correlationID := msg.CorrelationID
-	logger.Info("message_received", "correlation_id", correlationID, "session_id", payload.SessionID)
+	d.logger.Info("message_received", "correlation_id", correlationID, "session_id", payload.SessionID)
 
-	messages := injectSkillManifest(payload.Messages, skillsStore)
-	toolSchemas := toolRegistry.Schemas()
+	messages := injectSkillManifest(payload.Messages, d.store)
+
+	// Resolve active skill for this session. Stale entries (skill removed
+	// from disk since the record was written) are cleared silently.
+	activeName, activeSkill := d.resolveActiveSkill(ctx, correlationID, payload.SessionID)
+	d.warnUnknownAllowedTools(correlationID, activeName, activeSkill)
 
 	tokenChannel := fmt.Sprintf(messaging.ChannelTokens, payload.SessionID)
 	toolCallChannel := fmt.Sprintf(messaging.ChannelToolCalls, payload.SessionID)
@@ -119,7 +168,7 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 			Token:     token,
 		})
 		if err == nil {
-			_ = client.PubSubPublish(ctx, tokenChannel, tokenMsg)
+			_ = d.client.PubSubPublish(ctx, tokenChannel, tokenMsg)
 		}
 	}
 
@@ -129,7 +178,7 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 			Call:      call,
 		})
 		if err == nil {
-			_ = client.PubSubPublish(ctx, toolCallChannel, tcMsg)
+			_ = d.client.PubSubPublish(ctx, toolCallChannel, tcMsg)
 		}
 	}
 
@@ -140,7 +189,7 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 			Output:    output,
 		})
 		if err == nil {
-			_ = client.PubSubPublish(ctx, toolCallChannel, trMsg)
+			_ = d.client.PubSubPublish(ctx, toolCallChannel, trMsg)
 		}
 	}
 
@@ -154,28 +203,31 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 
 	overallStart := time.Now()
 	iter := 0
-	for ; iter < maxIter; iter++ {
-		slotID, err := rt.RequestSlotWithCorrelation(ctx, correlationID)
+	for ; iter < d.maxIter; iter++ {
+		toolSchemas := d.registry.SchemasFor(d.baseTools, allowedOf(activeSkill))
+		visible := visibleSet(d.registry, d.baseTools, activeSkill)
+
+		slotID, err := d.runtime.RequestSlotWithCorrelation(ctx, correlationID)
 		if err != nil {
-			logger.Error("failed to get slot", "correlation_id", correlationID, "iter", iter, "error", err)
+			d.logger.Error("failed to get slot", "correlation_id", correlationID, "iter", iter, "error", err)
 			loopErr = err
 			break
 		}
 
 		execStart := time.Now()
-		content, toolCalls, err := rt.ExecuteWithCorrelation(ctx, correlationID, messages, toolSchemas, onToken, onToolCall)
+		content, toolCalls, err := d.runtime.ExecuteWithCorrelation(ctx, correlationID, messages, toolSchemas, onToken, onToolCall)
 		execElapsed := time.Since(execStart).Milliseconds()
 
-		_ = rt.ReleaseSlotWithCorrelation(ctx, correlationID)
+		_ = d.runtime.ReleaseSlotWithCorrelation(ctx, correlationID)
 
 		switch {
 		case err == nil:
-			logger.Info("execute_done", "correlation_id", correlationID, "slot", slotID, "iter", iter, "elapsed_ms", execElapsed, "outcome", "ok")
+			d.logger.Info("execute_done", "correlation_id", correlationID, "slot", slotID, "iter", iter, "elapsed_ms", execElapsed, "outcome", "ok")
 		case err == messaging.ErrPreempted:
-			logger.Info("execute_done", "correlation_id", correlationID, "slot", slotID, "iter", iter, "elapsed_ms", execElapsed, "outcome", "preempted")
+			d.logger.Info("execute_done", "correlation_id", correlationID, "slot", slotID, "iter", iter, "elapsed_ms", execElapsed, "outcome", "preempted")
 			preempted = true
 		default:
-			logger.Error("execute_done", "correlation_id", correlationID, "slot", slotID, "iter", iter, "elapsed_ms", execElapsed, "outcome", "error", "error", err)
+			d.logger.Error("execute_done", "correlation_id", correlationID, "slot", slotID, "iter", iter, "elapsed_ms", execElapsed, "outcome", "error", "error", err)
 			loopErr = err
 		}
 
@@ -192,30 +244,53 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 
 		for _, call := range toolCalls {
 			invStart := time.Now()
-			res, _ := toolRegistry.Invoke(ctx, call.Function.Name, call.Function.Arguments)
-			logger.Info("tool_invoked",
+			output, elapsedMS, resultBytes, outcome := d.invokeOrGate(ctx, call, visible, activeName)
+
+			d.logger.Info("tool_invoked",
 				"correlation_id", correlationID,
 				"tool_name", call.Function.Name,
 				"args_bytes", len(call.Function.Arguments),
-				"elapsed_ms", res.ElapsedMS,
-				"outcome", res.Outcome,
-				"result_bytes", res.ResultSize,
+				"elapsed_ms", elapsedMS,
+				"outcome", outcome,
+				"result_bytes", resultBytes,
 				"iter", iter,
 				"total_elapsed_ms", time.Since(invStart).Milliseconds(),
+				"active_skill", activeName,
 			)
 			messages = append(messages, messaging.ChatMsg{
 				Role:       "tool",
-				Content:    res.Output,
+				Content:    output,
 				ToolCallID: call.ID,
 			})
 			allToolCalls = append(allToolCalls, call)
-			allToolResults = append(allToolResults, messaging.ToolResult{CallID: call.ID, Output: res.Output})
-			publishToolResult(call.ID, res.Output)
+			allToolResults = append(allToolResults, messaging.ToolResult{CallID: call.ID, Output: output})
+			publishToolResult(call.ID, output)
+
+			// Side-effect activation: successful read_skill with a known name
+			// updates the session's active skill for the NEXT iteration.
+			if call.Function.Name == "read_skill" && outcome == "ok" {
+				if newName, ok := parseReadSkillName(call.Function.Arguments); ok {
+					if _, exists := d.store.Get(newName); exists && newName != activeName {
+						d.logger.Info("active_skill_changed",
+							"correlation_id", correlationID,
+							"session_id", payload.SessionID,
+							"active_skill", newName,
+							"previous_skill", activeName,
+						)
+						if err := sessionskill.Set(ctx, d.rdb, payload.SessionID, newName, activeSkillTTL); err != nil {
+							d.logger.Error("session_active_skill_write", "session_id", payload.SessionID, "error", err)
+						}
+						activeName = newName
+						activeSkill, _ = d.store.Get(newName)
+						d.warnUnknownAllowedTools(correlationID, activeName, activeSkill)
+					}
+				}
+			}
 		}
 	}
 
-	if iter == maxIter {
-		logger.Warn("tool_loop_max_iter_hit", "correlation_id", correlationID, "iterations", iter)
+	if iter == d.maxIter {
+		d.logger.Warn("tool_loop_max_iter_hit", "correlation_id", correlationID, "iterations", iter)
 		if finalContent != "" && !strings.HasSuffix(finalContent, "\n") {
 			finalContent += "\n"
 		}
@@ -227,10 +302,10 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 		Done:      true,
 	})
 	if err == nil {
-		_ = client.PubSubPublish(ctx, tokenChannel, doneMsg)
+		_ = d.client.PubSubPublish(ctx, tokenChannel, doneMsg)
 	}
 
-	logger.Info("turn_complete",
+	d.logger.Info("turn_complete",
 		"correlation_id", correlationID,
 		"iterations", iter,
 		"tool_calls", len(allToolCalls),
@@ -247,9 +322,104 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 			Done:        true,
 		})
 		if err == nil {
-			_, _ = client.Publish(ctx, payload.ReplyStream, reply)
+			_, _ = d.client.Publish(ctx, payload.ReplyStream, reply)
 		}
 	}
+}
+
+// resolveActiveSkill returns the active skill name and manifest for the
+// session. If the stored name no longer matches a loaded skill, the stale
+// Valkey record is cleared and a transition is logged.
+func (d *requestDeps) resolveActiveSkill(ctx context.Context, correlationID, sessionID string) (string, *skills.Manifest) {
+	name, err := sessionskill.Get(ctx, d.rdb, sessionID)
+	if err != nil {
+		d.logger.Error("session_active_skill_read", "session_id", sessionID, "error", err)
+		return "", nil
+	}
+	if name == "" {
+		return "", nil
+	}
+	if m, ok := d.store.Get(name); ok {
+		return name, m
+	}
+	// Stale entry — skill was removed from disk. Clear and log the transition.
+	d.logger.Info("active_skill_changed",
+		"correlation_id", correlationID,
+		"session_id", sessionID,
+		"active_skill", "",
+		"previous_skill", name,
+		"reason", "skill_missing_from_store",
+	)
+	if err := sessionskill.Set(ctx, d.rdb, sessionID, "", 0); err != nil {
+		d.logger.Error("session_active_skill_clear", "session_id", sessionID, "error", err)
+	}
+	return "", nil
+}
+
+// warnUnknownAllowedTools emits one WARN per unknown entry in the active
+// skill's allowed-tools. Called at turn start and on activation change.
+func (d *requestDeps) warnUnknownAllowedTools(correlationID, activeName string, active *skills.Manifest) {
+	if active == nil {
+		return
+	}
+	for _, name := range active.AllowedTools {
+		if !d.registry.Has(name) {
+			d.logger.Warn("skill_allowed_tool_unknown",
+				"correlation_id", correlationID,
+				"active_skill", activeName,
+				"unknown_tool", name,
+			)
+		}
+	}
+}
+
+// invokeOrGate either invokes the tool or emits a gated error envelope.
+// Returns (output, elapsed_ms, result_bytes, outcome).
+func (d *requestDeps) invokeOrGate(ctx context.Context, call messaging.ToolCall, visible map[string]struct{}, activeName string) (string, int64, int, string) {
+	if _, ok := visible[call.Function.Name]; !ok {
+		envelope := fmt.Sprintf(`{"error":"tool not available under active skill: %s"}`, call.Function.Name)
+		return envelope, 0, len(envelope), "gated"
+	}
+	res, _ := d.registry.Invoke(ctx, call.Function.Name, call.Function.Arguments)
+	return res.Output, res.ElapsedMS, res.ResultSize, res.Outcome
+}
+
+// visibleSet computes base ∪ activeSkill.allowed-tools, restricted to names
+// actually registered. Used for invoke-time gating; mirrors what SchemasFor
+// emits for the LLM.
+func visibleSet(registry *tools.Registry, base []string, active *skills.Manifest) map[string]struct{} {
+	v := make(map[string]struct{}, len(base)+len(allowedOf(active)))
+	for _, n := range base {
+		if registry.Has(n) {
+			v[n] = struct{}{}
+		}
+	}
+	for _, n := range allowedOf(active) {
+		if registry.Has(n) {
+			v[n] = struct{}{}
+		}
+	}
+	return v
+}
+
+func allowedOf(m *skills.Manifest) []string {
+	if m == nil {
+		return nil
+	}
+	return m.AllowedTools
+}
+
+// parseReadSkillName extracts the "name" field from read_skill's arguments.
+// Returns ("", false) when the JSON is malformed or the field is missing/empty.
+func parseReadSkillName(argsJSON string) (string, bool) {
+	var args struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "", false
+	}
+	name := strings.TrimSpace(args.Name)
+	return name, name != ""
 }
 
 // injectSkillManifest appends an <available_skills> block to the first
@@ -318,4 +488,3 @@ func envInt(key string, fallback int) int {
 	}
 	return n
 }
-

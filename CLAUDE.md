@@ -11,6 +11,7 @@ Active development. Core services (gateway, context-manager, memory-service, ret
 - `docs/memory-system-design.md` — Memory layer design (Hindsight substrate, multi-speaker identity model, three-axis fact attribution)
 - `docs/curiosity-and-initiative.md` — Agent idle-time research and proactive conversation
 - `docs/self-improvement-framework.md` — Policy registry, reward modeling, LoRA pipeline
+- `docs/skills-runtime-design.md` — Skills runtime parity with Anthropic agent-skills + general-purpose `exec` code-execution service
 
 ## Workflow: OpenSpec
 

@@ -47,6 +47,24 @@ func TestHandleRequest_ToolLoopRunsTwoIterations(t *testing.T) {
 	if err := reg.Register(tools.NewReadSkill(store)); err != nil {
 		t.Fatal(err)
 	}
+	if err := reg.Register(tools.NewReadSkillFile(store)); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(tools.NewCurrentTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Schema order must be list_skills, read_skill, read_skill_file, current_time.
+	schemas := reg.Schemas()
+	wantOrder := []string{"list_skills", "read_skill", "read_skill_file", "current_time"}
+	if len(schemas) != len(wantOrder) {
+		t.Fatalf("schemas len = %d, want %d", len(schemas), len(wantOrder))
+	}
+	for i, want := range wantOrder {
+		if schemas[i].Function.Name != want {
+			t.Fatalf("schemas[%d] = %q, want %q", i, schemas[i].Function.Name, want)
+		}
+	}
 
 	rt := agent.NewRuntime(client, "main-agent", 0, false, logger)
 
@@ -135,7 +153,17 @@ func TestHandleRequest_ToolLoopRunsTwoIterations(t *testing.T) {
 	req.Payload = pbytes
 
 	// Run the handler.
-	handleRequest(ctx, client, rt, reg, store, 5, req, logger)
+	deps := &requestDeps{
+		client:    client,
+		runtime:   rt,
+		registry:  reg,
+		store:     store,
+		rdb:       client.Redis(),
+		baseTools: baseToolNames(reg),
+		maxIter:   5,
+		logger:    logger,
+	}
+	handleRequest(ctx, deps, req)
 
 	select {
 	case <-brokerDone:
