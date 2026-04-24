@@ -24,6 +24,8 @@ const (
 	TypeChatResponse    MessageType = "chat_response"
 	TypeToken           MessageType = "token"
 	TypeTokenDone       MessageType = "token_done"
+	TypeToolCall        MessageType = "tool_call"
+	TypeToolResult      MessageType = "tool_result"
 	TypeSessionEvent    MessageType = "session_event"
 	TypeContextAssembled MessageType = "context_assembled"
 	TypeRetroTrigger     MessageType = "retro_trigger"

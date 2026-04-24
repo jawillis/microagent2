@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -328,21 +329,55 @@ func (b *Broker) handleLLMRequest(ctx context.Context, msg *messaging.Message) {
 		return
 	}
 
-	tokenCh, errCh := b.ProxyLLMRequest(ctx, payload.SlotID, payload.Messages, payload.Stream)
+	tokenCh, toolCallCh, errCh := b.ProxyLLMRequest(ctx, payload.SlotID, payload.Messages, payload.Tools, payload.ToolChoice, payload.Stream)
 
 	replyStream := msg.ReplyStream
 	if replyStream == "" {
+		// Drain to avoid goroutine leak.
+		for range tokenCh {
+		}
+		for range toolCallCh {
+		}
+		<-errCh
 		return
 	}
 
 	var accumulated strings.Builder
-	for token := range tokenCh {
-		accumulated.WriteString(token)
-		tokenMsg, err := messaging.NewReply(msg, messaging.TypeToken, "llm-broker", messaging.TokenPayload{
-			Token: token,
-		})
-		if err == nil {
-			_, _ = b.client.Publish(ctx, replyStream, tokenMsg)
+	tokensClosed := false
+	toolCallsClosed := false
+	for !tokensClosed || !toolCallsClosed {
+		select {
+		case token, ok := <-tokenCh:
+			if !ok {
+				tokensClosed = true
+				tokenCh = nil
+				continue
+			}
+			accumulated.WriteString(token)
+			tokenMsg, err := messaging.NewReply(msg, messaging.TypeToken, "llm-broker", messaging.TokenPayload{
+				Token: token,
+			})
+			if err == nil {
+				_, _ = b.client.Publish(ctx, replyStream, tokenMsg)
+			}
+		case call, ok := <-toolCallCh:
+			if !ok {
+				toolCallsClosed = true
+				toolCallCh = nil
+				continue
+			}
+			tcMsg, err := messaging.NewReply(msg, messaging.TypeToolCall, "llm-broker", messaging.ToolCallPayload{
+				Call: call,
+			})
+			if err == nil {
+				_, _ = b.client.Publish(ctx, replyStream, tcMsg)
+			}
+			b.logger.Info("tool_call_assembled",
+				"correlation_id", msg.CorrelationID,
+				"call_id", call.ID,
+				"name", call.Function.Name,
+				"args_bytes", len(call.Function.Arguments),
+			)
 		}
 	}
 
@@ -373,15 +408,18 @@ func (b *Broker) IsPreemptible(agentID string) bool {
 }
 
 type chatCompletionRequest struct {
-	Model    string             `json:"model"`
-	Messages []messaging.ChatMsg `json:"messages"`
-	Stream   bool               `json:"stream"`
+	Model      string                `json:"model"`
+	Messages   []messaging.ChatMsg   `json:"messages"`
+	Stream     bool                  `json:"stream"`
+	Tools      []messaging.ToolSchema `json:"tools,omitempty"`
+	ToolChoice string                `json:"tool_choice,omitempty"`
 }
 
 type chatCompletionResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string               `json:"content"`
+			ToolCalls []messaging.ToolCall `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
 }
@@ -389,25 +427,48 @@ type chatCompletionResponse struct {
 type chatCompletionChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content      string                `json:"content"`
+			ToolCalls    []toolCallDelta       `json:"tool_calls"`
+			FunctionCall json.RawMessage       `json:"function_call"`
 		} `json:"delta"`
 	} `json:"choices"`
 }
 
-func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []messaging.ChatMsg, stream bool) (<-chan string, <-chan error) {
+type toolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type toolCallAcc struct {
+	ID      string
+	Type    string
+	Name    string
+	ArgsBuf strings.Builder
+}
+
+func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []messaging.ChatMsg, tools []messaging.ToolSchema, toolChoice string, stream bool) (<-chan string, <-chan messaging.ToolCall, <-chan error) {
 	tokenCh := make(chan string, 100)
+	toolCallCh := make(chan messaging.ToolCall, 8)
 	errCh := make(chan error, 1)
 
 	go func() {
 		defer close(tokenCh)
+		defer close(toolCallCh)
 		defer close(errCh)
 
 		url := fmt.Sprintf("http://%s/v1/chat/completions", b.llamaAddr)
 
 		reqBody, err := json.Marshal(chatCompletionRequest{
-			Model:    b.model,
-			Messages: messages,
-			Stream:   stream,
+			Model:      b.model,
+			Messages:   messages,
+			Stream:     stream,
+			Tools:      tools,
+			ToolChoice: toolChoice,
 		})
 		if err != nil {
 			errCh <- err
@@ -438,28 +499,39 @@ func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []mes
 		}
 
 		if stream {
-			b.readSSEStream(resp.Body, tokenCh, errCh)
+			b.readSSEStream(resp.Body, tokenCh, toolCallCh, errCh)
 		} else {
-			b.readFullResponse(resp.Body, tokenCh, errCh)
+			b.readFullResponse(resp.Body, tokenCh, toolCallCh, errCh)
 		}
 	}()
 
-	return tokenCh, errCh
+	return tokenCh, toolCallCh, errCh
 }
 
-func (b *Broker) readFullResponse(body io.Reader, tokenCh chan<- string, errCh chan<- error) {
+func (b *Broker) readFullResponse(body io.Reader, tokenCh chan<- string, toolCallCh chan<- messaging.ToolCall, errCh chan<- error) {
 	var resp chatCompletionResponse
 	if err := json.NewDecoder(body).Decode(&resp); err != nil {
 		errCh <- fmt.Errorf("decode response: %w", err)
 		return
 	}
 	if len(resp.Choices) > 0 {
-		tokenCh <- resp.Choices[0].Message.Content
+		if resp.Choices[0].Message.Content != "" {
+			tokenCh <- resp.Choices[0].Message.Content
+		}
+		for _, call := range resp.Choices[0].Message.ToolCalls {
+			toolCallCh <- call
+		}
 	}
 }
 
-func (b *Broker) readSSEStream(body io.Reader, tokenCh chan<- string, errCh chan<- error) {
+func (b *Broker) readSSEStream(body io.Reader, tokenCh chan<- string, toolCallCh chan<- messaging.ToolCall, errCh chan<- error) {
 	scanner := bufio.NewScanner(body)
+	// Increase buffer so long arguments don't overflow the default 64KB.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	accs := map[int]*toolCallAcc{}
+	legacyWarned := false
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -467,17 +539,70 @@ func (b *Broker) readSSEStream(body io.Reader, tokenCh chan<- string, errCh chan
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
-			return
+			break
 		}
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			tokenCh <- chunk.Choices[0].Delta.Content
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+
+		if delta.Content != "" {
+			tokenCh <- delta.Content
+		}
+
+		if len(delta.ToolCalls) > 0 {
+			for _, frag := range delta.ToolCalls {
+				acc, ok := accs[frag.Index]
+				if !ok {
+					acc = &toolCallAcc{}
+					accs[frag.Index] = acc
+				}
+				if acc.ID == "" && frag.ID != "" {
+					acc.ID = frag.ID
+				}
+				if acc.Type == "" && frag.Type != "" {
+					acc.Type = frag.Type
+				}
+				if acc.Name == "" && frag.Function.Name != "" {
+					acc.Name = frag.Function.Name
+				}
+				if frag.Function.Arguments != "" {
+					acc.ArgsBuf.WriteString(frag.Function.Arguments)
+				}
+			}
+		} else if len(delta.FunctionCall) > 0 {
+			if !legacyWarned {
+				b.logger.Warn("tool_call_legacy_unsupported")
+				legacyWarned = true
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		errCh <- err
+	}
+
+	indices := make([]int, 0, len(accs))
+	for idx := range accs {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	for _, idx := range indices {
+		acc := accs[idx]
+		typ := acc.Type
+		if typ == "" {
+			typ = "function"
+		}
+		toolCallCh <- messaging.ToolCall{
+			ID:   acc.ID,
+			Type: typ,
+			Function: messaging.ToolCallFunction{
+				Name:      acc.Name,
+				Arguments: acc.ArgsBuf.String(),
+			},
+		}
 	}
 }

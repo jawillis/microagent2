@@ -75,6 +75,10 @@ services:
       - AGENT_PRIORITY=0
       - AGENT_PREEMPTIBLE=false
       - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
+      - SKILLS_DIR=/app/skills
+      - TOOL_LOOP_MAX_ITER=${TOOL_LOOP_MAX_ITER:-10}
+    volumes:
+      - ./skills:/app/skills:ro
     depends_on:
       valkey:
         condition: service_healthy

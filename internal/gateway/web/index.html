@@ -106,6 +106,40 @@
         <tbody></tbody>
       </table>
 
+      <h3>MCP Servers</h3>
+      <div id="mcp-restart-banner" class="restart-banner hidden">
+        Restart main-agent to apply MCP config changes.
+      </div>
+      <table id="mcp-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Enabled</th>
+            <th>Command</th>
+            <th>Connected</th>
+            <th>Tools</th>
+            <th>Last Error</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <button id="mcp-add-btn" class="action-btn">Add server</button>
+      <form id="mcp-form" class="hidden">
+        <div class="form-grid">
+          <label>Name<input type="text" id="mcp-name"></label>
+          <label>Command<input type="text" id="mcp-command"></label>
+          <label>Args (space-separated)<input type="text" id="mcp-args"></label>
+          <label>
+            <input type="checkbox" id="mcp-enabled"> Enabled
+          </label>
+        </div>
+        <label>Env (KEY=VALUE per line)<textarea id="mcp-env" rows="3"></textarea></label>
+        <button type="submit" class="save-btn">Save server</button>
+        <button type="button" id="mcp-cancel" class="action-btn">Cancel</button>
+        <span class="save-status" id="mcp-status"></span>
+      </form>
+
       <h3>Retro Policy</h3>
       <form id="retro-form">
         <div class="form-grid">

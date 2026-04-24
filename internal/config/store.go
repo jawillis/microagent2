@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	KeyChat   = "config:chat"
-	KeyMemory = "config:memory"
-	KeyBroker = "config:broker"
-	KeyRetro  = "config:retro"
+	KeyChat       = "config:chat"
+	KeyMemory     = "config:memory"
+	KeyBroker     = "config:broker"
+	KeyRetro      = "config:retro"
+	KeyMCPServers = "config:mcp:servers"
 )
 
 var validSections = map[string]string{

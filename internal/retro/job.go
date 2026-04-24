@@ -107,7 +107,7 @@ func (j *MemoryExtractionJob) Run(ctx context.Context, sessionID string, cp *Che
 	}
 	defer j.runtime.ReleaseSlot(ctx)
 
-	result, err := j.runtime.Execute(ctx, prompt, nil)
+	result, _, err := j.runtime.Execute(ctx, prompt, nil, nil, nil)
 	if err == messaging.ErrPreempted {
 		j.checkpoint.Save(sessionID, j.Type(), &Checkpoint{
 			ProcessedTurns: startIdx + countProcessedFromProgress(j.runtime.GetProgressLog(), unprocessed),
@@ -190,7 +190,7 @@ func (j *SkillCreationJob) Run(ctx context.Context, sessionID string, cp *Checkp
 	}
 	defer j.runtime.ReleaseSlot(ctx)
 
-	result, err := j.runtime.Execute(ctx, prompt, nil)
+	result, _, err := j.runtime.Execute(ctx, prompt, nil, nil, nil)
 	if err == messaging.ErrPreempted {
 		j.checkpoint.Save(sessionID, j.Type(), &Checkpoint{
 			ProcessedTurns: startIdx + countProcessedFromProgress(j.runtime.GetProgressLog(), unprocessed),
@@ -273,7 +273,7 @@ func (j *CurationJob) Run(ctx context.Context, sessionID string, _ *Checkpoint) 
 			return fmt.Errorf("request slot: %w", err)
 		}
 
-		result, err := j.runtime.Execute(ctx, prompt, nil)
+		result, _, err := j.runtime.Execute(ctx, prompt, nil, nil, nil)
 		_ = j.runtime.ReleaseSlot(ctx)
 
 		if err == messaging.ErrPreempted {

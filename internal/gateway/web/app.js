@@ -10,7 +10,7 @@
       document.getElementById("panel-" + btn.dataset.panel).classList.add("active");
       if (btn.dataset.panel === "sessions") loadSessions();
       if (btn.dataset.panel === "system") loadStatus();
-      if (btn.dataset.panel === "agents") { loadStatus(); loadConfig(); }
+      if (btn.dataset.panel === "agents") { loadStatus(); loadConfig(); loadMCPServers(); }
     });
   });
 
@@ -163,14 +163,72 @@
       var container = document.getElementById("session-messages");
       container.innerHTML = "";
       (data.messages || []).forEach(function (m) {
-        var div = document.createElement("div");
-        div.className = "msg";
-        div.innerHTML = '<div class="msg-role ' + esc(m.role) + '">' + esc(m.role) + '</div>' +
-                        '<div class="msg-content">' + esc(m.content) + '</div>';
-        container.appendChild(div);
+        container.appendChild(renderMessage(m));
       });
       document.getElementById("session-detail").classList.remove("hidden");
     });
+  }
+
+  function renderMessage(m) {
+    // Assistant message with tool_calls: render each as a collapsed status block.
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      var wrap = document.createElement("div");
+      wrap.className = "msg";
+      m.tool_calls.forEach(function (tc) {
+        wrap.appendChild(renderToolCallBlock(tc));
+      });
+      if (m.content) {
+        var textDiv = document.createElement("div");
+        textDiv.className = "msg-content";
+        textDiv.textContent = m.content;
+        wrap.appendChild(textDiv);
+      }
+      return wrap;
+    }
+    // Tool result message: collapsed block with the output.
+    if (m.role === "tool") {
+      return renderToolResultBlock(m);
+    }
+    var div = document.createElement("div");
+    div.className = "msg";
+    div.innerHTML = '<div class="msg-role ' + esc(m.role) + '">' + esc(m.role) + '</div>' +
+                    '<div class="msg-content">' + esc(m.content) + '</div>';
+    return div;
+  }
+
+  function renderToolCallBlock(tc) {
+    var det = document.createElement("details");
+    det.className = "tool-call";
+    var sum = document.createElement("summary");
+    sum.textContent = "🔧 " + (tc.function && tc.function.name ? tc.function.name : "tool_call");
+    det.appendChild(sum);
+    var body = document.createElement("pre");
+    body.className = "tool-call-body";
+    body.textContent = prettyJSON(tc.function && tc.function.arguments);
+    det.appendChild(body);
+    return det;
+  }
+
+  function renderToolResultBlock(m) {
+    var det = document.createElement("details");
+    det.className = "tool-call tool-result";
+    var sum = document.createElement("summary");
+    sum.textContent = "↳ tool result" + (m.tool_call_id ? " (" + m.tool_call_id + ")" : "");
+    det.appendChild(sum);
+    var body = document.createElement("pre");
+    body.className = "tool-call-body";
+    body.textContent = m.content || "";
+    det.appendChild(body);
+    return det;
+  }
+
+  function prettyJSON(s) {
+    if (s == null || s === "") return "";
+    try {
+      return JSON.stringify(JSON.parse(s), null, 2);
+    } catch (_e) {
+      return String(s);
+    }
   }
 
   document.getElementById("close-detail").addEventListener("click", function () {
@@ -245,6 +303,155 @@
     d.textContent = String(s);
     return d.innerHTML;
   }
+
+  // --- MCP Servers ---
+  var mcpEditingName = null;
+
+  function loadMCPServers() {
+    Promise.all([
+      api("GET", "/v1/mcp/servers"),
+      api("GET", "/v1/status")
+    ]).then(function (results) {
+      var stored = (results[0] && results[0].servers) || [];
+      var live = (results[1] && results[1].mcp_servers) || [];
+      var liveByName = {};
+      live.forEach(function (e) { liveByName[e.name] = e; });
+      var tbody = document.querySelector("#mcp-table tbody");
+      tbody.innerHTML = "";
+      stored.forEach(function (s) {
+        var l = liveByName[s.name] || {};
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td>" + esc(s.name) + "</td>" +
+          "<td>" + (s.enabled ? "Yes" : "No") + "</td>" +
+          "<td><code>" + esc(s.command) + (s.args && s.args.length ? " " + esc(s.args.join(" ")) : "") + "</code></td>" +
+          "<td>" + (l.connected ? "✓" : "—") + "</td>" +
+          "<td>" + (l.tool_count || 0) + "</td>" +
+          "<td>" + esc(l.last_error || "") + "</td>" +
+          "<td></td>";
+        var actions = tr.querySelector("td:last-child");
+        var edit = document.createElement("button");
+        edit.className = "action-btn";
+        edit.textContent = "Edit";
+        edit.addEventListener("click", function () { mcpOpenForm(s); });
+        actions.appendChild(edit);
+        var del = document.createElement("button");
+        del.className = "action-btn danger";
+        del.textContent = "Delete";
+        del.addEventListener("click", function () { mcpDelete(s.name); });
+        actions.appendChild(del);
+        tbody.appendChild(tr);
+      });
+
+      // Drift detection: show banner when stored config diverges from live state.
+      var banner = document.getElementById("mcp-restart-banner");
+      var drift = computeMCPDrift(stored, liveByName);
+      if (drift) banner.classList.remove("hidden");
+      else banner.classList.add("hidden");
+    }).catch(function (e) {
+      console.error("loadMCPServers", e);
+    });
+  }
+
+  function computeMCPDrift(stored, liveByName) {
+    // Banner shows when stored names/commands/args/env/enabled differ from
+    // what main-agent has actually loaded (reported via mcp_servers health).
+    // Simple heuristic: any stored entry without a matching live entry, or
+    // any live entry missing from stored, or any enabled-disagreement.
+    var storedNames = stored.map(function (s) { return s.name; });
+    var liveNames = Object.keys(liveByName);
+    if (storedNames.length !== liveNames.length) return true;
+    for (var i = 0; i < stored.length; i++) {
+      var s = stored[i];
+      var l = liveByName[s.name];
+      if (!l) return true;
+      if (!!s.enabled !== !!l.enabled) return true;
+    }
+    return false;
+  }
+
+  function mcpOpenForm(existing) {
+    var form = document.getElementById("mcp-form");
+    form.classList.remove("hidden");
+    document.getElementById("mcp-name").value = existing ? existing.name : "";
+    document.getElementById("mcp-name").disabled = !!existing;
+    document.getElementById("mcp-command").value = existing ? existing.command : "";
+    document.getElementById("mcp-args").value = existing && existing.args ? existing.args.join(" ") : "";
+    document.getElementById("mcp-enabled").checked = existing ? !!existing.enabled : true;
+    document.getElementById("mcp-env").value = existing && existing.env
+      ? Object.keys(existing.env).map(function (k) { return k + "=" + existing.env[k]; }).join("\n")
+      : "";
+    mcpEditingName = existing ? existing.name : null;
+  }
+
+  document.getElementById("mcp-add-btn").addEventListener("click", function () { mcpOpenForm(null); });
+  document.getElementById("mcp-cancel").addEventListener("click", function () {
+    document.getElementById("mcp-form").classList.add("hidden");
+    mcpEditingName = null;
+  });
+
+  document.getElementById("mcp-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var entry = {
+      name: getVal("mcp-name"),
+      command: getVal("mcp-command"),
+      args: getVal("mcp-args").split(/\s+/).filter(Boolean),
+      enabled: document.getElementById("mcp-enabled").checked,
+      env: parseEnvText(getVal("mcp-env"))
+    };
+    var done = function () {
+      document.getElementById("mcp-form").classList.add("hidden");
+      mcpEditingName = null;
+      loadMCPServers();
+      showStatus("mcp-status", true, "Saved — restart main-agent to apply");
+    };
+    var fail = function (err) { showStatus("mcp-status", false, err.message); };
+    if (mcpEditingName) {
+      // PUT the full list with this entry replaced.
+      api("GET", "/v1/mcp/servers").then(function (cur) {
+        var list = (cur.servers || []).map(function (s) {
+          return s.name === mcpEditingName ? entry : s;
+        });
+        return api("PUT", "/v1/mcp/servers", { servers: list });
+      }).then(done).catch(fail);
+    } else {
+      api("POST", "/v1/mcp/servers", entry).then(done).catch(fail);
+    }
+  });
+
+  function mcpDelete(name) {
+    if (!confirm("Delete MCP server " + name + "?")) return;
+    api("DELETE", "/v1/mcp/servers/" + encodeURIComponent(name))
+      .then(function () { loadMCPServers(); })
+      .catch(function (e) { alert(e.message); });
+  }
+
+  function parseEnvText(s) {
+    var out = {};
+    s.split(/\n/).forEach(function (line) {
+      line = line.trim();
+      if (!line) return;
+      var idx = line.indexOf("=");
+      if (idx < 0) return;
+      out[line.slice(0, idx).trim()] = line.slice(idx + 1);
+    });
+    return out;
+  }
+
+  // Patched api() to tolerate 204 No Content
+  var _api = api;
+  api = function (method, path, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(path, opts).then(function (r) {
+      if (!r.ok) return r.json().then(function (e) { throw new Error(e.error ? e.error.message : r.statusText); });
+      if (r.status === 204) return null;
+      return r.json();
+    });
+  };
 
   // Initial load
   loadConfig();

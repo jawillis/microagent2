@@ -49,3 +49,12 @@ dl{display:grid;grid-template-columns:auto 1fr;gap:0.3rem 1rem;font-size:0.9rem}
 dt{color:var(--text-muted);font-weight:500}
 dd{color:var(--text)}
 .retro-select{width:auto;display:inline;margin-right:0.3rem;padding:0.2rem 0.4rem;font-size:0.8rem}
+.tool-call{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:0.4rem 0.6rem;margin:0.3rem 0;font-size:0.85rem}
+.tool-call summary{cursor:pointer;color:var(--text-muted);font-family:monospace;outline-offset:2px}
+.tool-call summary:focus-visible{outline:2px solid var(--accent)}
+.tool-call[open] summary{color:var(--text);margin-bottom:0.3rem}
+.tool-call-body{font-family:monospace;font-size:0.8rem;white-space:pre-wrap;word-break:break-word;color:var(--text);padding:0.3rem 0;max-height:300px;overflow:auto}
+.tool-call.tool-result{border-color:var(--ok)}
+.restart-banner{background:#3a2f1a;border:1px solid #8a6a2e;color:#f6c774;padding:0.5rem 0.75rem;border-radius:var(--radius);margin-bottom:0.75rem;font-size:0.85rem}
+#mcp-table code{font-size:0.8rem;color:var(--text-muted)}
+#mcp-form{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:0.75rem;margin-top:0.5rem}

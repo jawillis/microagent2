@@ -122,7 +122,7 @@ func TestEndToEnd(t *testing.T) {
 					continue
 				}
 
-				result, _ := rt.Execute(ctx, payload.Messages, nil)
+				result, _, _ := rt.Execute(ctx, payload.Messages, nil, nil, nil)
 				_ = rt.ReleaseSlot(ctx)
 
 				if payload.ReplyStream != "" {
@@ -585,7 +585,7 @@ func TestTwoTurnResponsesNoSlotLeak(t *testing.T) {
 					_ = client.Ack(ctx, agentStream, agentGroup, ids[i])
 					continue
 				}
-				result, _ := rt.ExecuteWithCorrelation(ctx, msg.CorrelationID, payload.Messages, nil)
+				result, _, _ := rt.ExecuteWithCorrelation(ctx, msg.CorrelationID, payload.Messages, nil, nil, nil)
 				_ = rt.ReleaseSlotWithCorrelation(ctx, msg.CorrelationID)
 
 				if payload.ReplyStream != "" {

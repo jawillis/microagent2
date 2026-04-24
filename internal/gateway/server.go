@@ -56,6 +56,10 @@ func New(client *messaging.Client, logger *slog.Logger, configStore *config.Stor
 	s.mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 	s.mux.HandleFunc("POST /v1/retro/{session}/trigger", s.handleRetroTrigger)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
+	s.mux.HandleFunc("GET /v1/mcp/servers", s.handleListMCPServers)
+	s.mux.HandleFunc("PUT /v1/mcp/servers", s.handlePutMCPServers)
+	s.mux.HandleFunc("POST /v1/mcp/servers", s.handleAddMCPServer)
+	s.mux.HandleFunc("DELETE /v1/mcp/servers/{name}", s.handleDeleteMCPServer)
 
 	webFS, _ := fs.Sub(webFiles, "web")
 	s.mux.Handle("GET /", http.FileServer(http.FS(webFS)))
@@ -422,28 +426,10 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	responses, err := s.responses.GetSessionHistory(r.Context(), sessionID)
+	messages, err := s.responses.GetSessionMessages(r.Context(), sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to read session")
 		return
-	}
-
-	var messages []messaging.ChatMsg
-	for _, resp := range responses {
-		messages = append(messages, inputItemsToMessages(resp.Input)...)
-		for _, out := range resp.Output {
-			if out.Type == "message" && out.Role == "assistant" {
-				var text string
-				for _, part := range out.Content {
-					if part.Type == "output_text" || part.Type == "text" {
-						text += part.Text
-					}
-				}
-				if text != "" {
-					messages = append(messages, messaging.ChatMsg{Role: "assistant", Content: text})
-				}
-			}
-		}
 	}
 	if messages == nil {
 		messages = []messaging.ChatMsg{}
@@ -559,9 +545,10 @@ type agentStatus struct {
 }
 
 type statusResponse struct {
-	Services []ServiceHealth `json:"services"`
-	Agents   []agentStatus   `json:"agents"`
-	System   systemInfo      `json:"system"`
+	Services   []ServiceHealth   `json:"services"`
+	Agents     []agentStatus     `json:"agents"`
+	System     systemInfo        `json:"system"`
+	MCPServers []json.RawMessage `json:"mcp_servers"`
 }
 
 type systemInfo struct {
@@ -606,6 +593,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			LlamaAddr:   s.llamaAddr,
 			MuninnAddr:  s.muninnAddr,
 		},
+		MCPServers: readMCPHealth(r, s.client.Redis()),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

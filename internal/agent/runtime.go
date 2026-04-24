@@ -4,12 +4,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"microagent2/internal/messaging"
 )
+
+func toolCallFinalizeTimeout() time.Duration {
+	if v := os.Getenv("TOOL_CALL_FINALIZE_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 2 * time.Second
+}
 
 type Runtime struct {
 	client      *messaging.Client
@@ -211,18 +222,18 @@ func (r *Runtime) IsPreempted() bool {
 	return r.preempted
 }
 
-func (r *Runtime) Execute(ctx context.Context, messages []messaging.ChatMsg, onToken func(string)) (string, error) {
-	return r.ExecuteWithCorrelation(ctx, "", messages, onToken)
+func (r *Runtime) Execute(ctx context.Context, messages []messaging.ChatMsg, tools []messaging.ToolSchema, onToken func(string), onToolCall func(messaging.ToolCall)) (string, []messaging.ToolCall, error) {
+	return r.ExecuteWithCorrelation(ctx, "", messages, tools, onToken, onToolCall)
 }
 
-func (r *Runtime) ExecuteWithCorrelation(ctx context.Context, parentCorrelationID string, messages []messaging.ChatMsg, onToken func(string)) (string, error) {
+func (r *Runtime) ExecuteWithCorrelation(ctx context.Context, parentCorrelationID string, messages []messaging.ChatMsg, tools []messaging.ToolSchema, onToken func(string), onToolCall func(messaging.ToolCall)) (string, []messaging.ToolCall, error) {
 	r.mu.Lock()
 	slotID := r.slotID
 	r.progressLog = nil
 	r.mu.Unlock()
 
 	if slotID == -1 {
-		return "", messaging.ErrNoSlot
+		return "", nil, messaging.ErrNoSlot
 	}
 
 	preemptCtx, preemptCancel := context.WithCancel(ctx)
@@ -235,17 +246,19 @@ func (r *Runtime) ExecuteWithCorrelation(ctx context.Context, parentCorrelationI
 	replyStream := fmt.Sprintf("stream:llm-reply:%s:%d", r.agentID, time.Now().UnixNano())
 
 	reqMsg, err := messaging.NewMessage(messaging.TypeChatRequest, r.agentID, messaging.LLMRequestPayload{
-		SlotID:   slotID,
-		Messages: messages,
-		Stream:   true,
+		SlotID:     slotID,
+		Messages:   messages,
+		Stream:     true,
+		Tools:      tools,
+		ToolChoice: "",
 	})
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	reqMsg.ReplyStream = replyStream
 
 	if _, err := r.client.Publish(ctx, "stream:broker:llm-requests", reqMsg); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	r.logger.Info("llm_request_published",
 		"correlation_id", parentCorrelationID,
@@ -254,17 +267,45 @@ func (r *Runtime) ExecuteWithCorrelation(ctx context.Context, parentCorrelationI
 	)
 
 	var result strings.Builder
+	var toolCalls []messaging.ToolCall
 	group := fmt.Sprintf("cg:llm-reply:%s", reqMsg.CorrelationID)
 	consumer := "token-reader"
 
 	if err := r.client.EnsureGroup(ctx, replyStream, group); err != nil {
-		return "", err
+		return "", nil, err
+	}
+
+	finalizeDeadline := time.Time{} // zero = not armed
+
+	logObserved := func() {
+		if len(toolCalls) == 0 {
+			return
+		}
+		names := make([]string, 0, len(toolCalls))
+		seen := map[string]bool{}
+		for _, c := range toolCalls {
+			if !seen[c.Function.Name] {
+				names = append(names, c.Function.Name)
+				seen[c.Function.Name] = true
+			}
+		}
+		r.logger.Info("tool_calls_observed",
+			"correlation_id", parentCorrelationID,
+			"slot", slotID,
+			"count", len(toolCalls),
+			"names", names,
+		)
 	}
 
 	for {
-		if r.IsPreempted() {
+		if r.IsPreempted() && finalizeDeadline.IsZero() {
+			finalizeDeadline = time.Now().Add(toolCallFinalizeTimeout())
+		}
+
+		if !finalizeDeadline.IsZero() && time.Now().After(finalizeDeadline) {
 			preemptCancel()
-			return result.String(), messaging.ErrPreempted
+			logObserved()
+			return result.String(), toolCalls, messaging.ErrPreempted
 		}
 
 		msgs, ids, err := r.client.ReadGroup(ctx, replyStream, group, consumer, 1, time.Second)
@@ -273,27 +314,50 @@ func (r *Runtime) ExecuteWithCorrelation(ctx context.Context, parentCorrelationI
 		}
 
 		for i, msg := range msgs {
-			var token messaging.TokenPayload
-			if err := msg.DecodePayload(&token); err != nil {
-				continue
-			}
-
-			if token.Done {
+			switch msg.Type {
+			case messaging.TypeToolCall:
+				var payload messaging.ToolCallPayload
+				if err := msg.DecodePayload(&payload); err != nil {
+					_ = r.client.Ack(ctx, replyStream, group, ids[i])
+					continue
+				}
+				toolCalls = append(toolCalls, payload.Call)
+				if onToolCall != nil {
+					onToolCall(payload.Call)
+				}
 				_ = r.client.Ack(ctx, replyStream, group, ids[i])
-				return result.String(), nil
+
+			case messaging.TypeToken:
+				var token messaging.TokenPayload
+				if err := msg.DecodePayload(&token); err != nil {
+					_ = r.client.Ack(ctx, replyStream, group, ids[i])
+					continue
+				}
+
+				if token.Done {
+					_ = r.client.Ack(ctx, replyStream, group, ids[i])
+					logObserved()
+					if !finalizeDeadline.IsZero() {
+						return result.String(), toolCalls, messaging.ErrPreempted
+					}
+					return result.String(), toolCalls, nil
+				}
+
+				result.WriteString(token.Token)
+
+				r.mu.Lock()
+				r.progressLog = append(r.progressLog, token.Token)
+				r.mu.Unlock()
+
+				if onToken != nil {
+					onToken(token.Token)
+				}
+
+				_ = r.client.Ack(ctx, replyStream, group, ids[i])
+
+			default:
+				_ = r.client.Ack(ctx, replyStream, group, ids[i])
 			}
-
-			result.WriteString(token.Token)
-
-			r.mu.Lock()
-			r.progressLog = append(r.progressLog, token.Token)
-			r.mu.Unlock()
-
-			if onToken != nil {
-				onToken(token.Token)
-			}
-
-			_ = r.client.Ack(ctx, replyStream, group, ids[i])
 		}
 	}
 }

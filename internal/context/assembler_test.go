@@ -132,6 +132,41 @@ func TestAssemble_AtMostOneSystemMessage(t *testing.T) {
 	}
 }
 
+func TestAssemble_PreservesToolFieldsInHistory(t *testing.T) {
+	a := NewAssembler(testSystemPrompt)
+	history := []messaging.ChatMsg{
+		{Role: "user", Content: "pls"},
+		{Role: "assistant", ToolCalls: []messaging.ToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: messaging.ToolCallFunction{Name: "list_skills", Arguments: "{}"},
+		}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "skill list output"},
+		{Role: "assistant", Content: "here you go"},
+	}
+	user := messaging.ChatMsg{Role: "user", Content: "follow-up"}
+
+	out := a.Assemble(nil, history, user)
+
+	// system + history(4) + user = 6
+	if len(out) != 6 {
+		t.Fatalf("len: %d %+v", len(out), out)
+	}
+	if out[2].Role != "assistant" || len(out[2].ToolCalls) != 1 || out[2].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("assistant tool_calls lost: %+v", out[2])
+	}
+	if out[3].Role != "tool" || out[3].ToolCallID != "call_1" || out[3].Content != "skill list output" {
+		t.Fatalf("tool result lost: %+v", out[3])
+	}
+	if out[5].Role != "user" || out[5].Content != "follow-up" {
+		t.Fatalf("user turn wrong: %+v", out[5])
+	}
+	// System prompt invariant holds
+	if out[0].Content != testSystemPrompt {
+		t.Fatalf("system prompt drifted")
+	}
+}
+
 func TestAssemble_DoesNotMutateInputs(t *testing.T) {
 	a := NewAssembler(testSystemPrompt)
 	memories := []Memory{
@@ -151,7 +186,7 @@ func TestAssemble_DoesNotMutateInputs(t *testing.T) {
 			t.Fatalf("memories mutated at index %d: before=%+v after=%+v", i, snapshotMem[i], m)
 		}
 	}
-	if user != snapshotUser {
+	if user.Role != snapshotUser.Role || user.Content != snapshotUser.Content || user.ToolCallID != snapshotUser.ToolCallID || len(user.ToolCalls) != len(snapshotUser.ToolCalls) {
 		t.Fatalf("userMessage mutated: before=%+v after=%+v", snapshotUser, user)
 	}
 }

@@ -146,7 +146,31 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 		return
 	}
 
-	outputItems := textToOutputItems(payload.Content)
+	// Interleave function_call + function_call_output pairs in the order they
+	// occurred, then append the final assistant text message. Results matched
+	// to calls by CallID; a tool_call without a matching tool_result is
+	// persisted as a lone function_call (e.g. mid-preempt).
+	resultByCallID := map[string]string{}
+	for _, tr := range payload.ToolResults {
+		resultByCallID[tr.CallID] = tr.Output
+	}
+	var outputItems []response.OutputItem
+	for _, tc := range payload.ToolCalls {
+		outputItems = append(outputItems, response.OutputItem{
+			Type:   "function_call",
+			CallID: tc.ID,
+			Name:   tc.Function.Name,
+			Args:   tc.Function.Arguments,
+		})
+		if out, ok := resultByCallID[tc.ID]; ok {
+			outputItems = append(outputItems, response.OutputItem{
+				Type:   "function_call_output",
+				CallID: tc.ID,
+				Output: out,
+			})
+		}
+	}
+	outputItems = append(outputItems, textToOutputItems(payload.Content)...)
 
 	if store {
 		// Store only the current turn's user input. The session's growing
@@ -172,6 +196,12 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 		}
 	}
 
+	// Strip server-internal function_call / function_call_output items from the
+	// client-facing response. The client didn't ask for tool calling and the
+	// trace is an implementation detail of the server-side agent loop. The
+	// dashboard reads the full trace directly from storage.
+	clientOutput := clientFacingOutput(outputItems)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(responsesResponse{
 		ID:                 responseID,
@@ -180,7 +210,7 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 		Model:              model,
 		SessionID:          sessionID,
 		PreviousResponseID: previousResponseID,
-		Output:             outputItems,
+		Output:             clientOutput,
 		Status:             response.StatusCompleted,
 	})
 	s.logger.Info("gateway_request_completed",
@@ -205,6 +235,9 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 	channel := fmt.Sprintf(messaging.ChannelTokens, sessionID)
 	sub := s.client.PubSubSubscribe(ctx, channel)
 	defer sub.Close()
+	toolCallChannel := fmt.Sprintf(messaging.ChannelToolCalls, sessionID)
+	tcSub := s.client.PubSubSubscribe(ctx, toolCallChannel)
+	defer tcSub.Close()
 	s.logger.Info("gateway_stream_subscribed", "correlation_id", correlationID, "session_id", sessionID)
 
 	// Emit response.created first so clients can capture the id immediately
@@ -228,6 +261,7 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 	}
 
 	var fullContent string
+	var agenticItems []response.OutputItem // interleaved function_call / function_call_output in arrival order
 	firstTokenSeen := false
 
 	for {
@@ -235,6 +269,41 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 		case <-ctx.Done():
 			s.logger.Warn("gateway_client_disconnected", "correlation_id", correlationID, "session_id", sessionID, "elapsed_ms", time.Since(publishStart).Milliseconds())
 			return
+		case redisMsg := <-tcSub.Channel():
+			if redisMsg == nil {
+				continue
+			}
+			var msg messaging.Message
+			if err := json.Unmarshal([]byte(redisMsg.Payload), &msg); err != nil {
+				continue
+			}
+			// Internal tool activity is NOT relayed to the client. The agent's
+			// server-side tool loop is an implementation detail; clients see
+			// only the final assistant text. We still collect the trace here
+			// so it gets persisted at stream completion for the dashboard.
+			switch msg.Type {
+			case messaging.TypeToolCall:
+				var tcPayload messaging.ToolCallPayload
+				if err := msg.DecodePayload(&tcPayload); err != nil {
+					continue
+				}
+				agenticItems = append(agenticItems, response.OutputItem{
+					Type:   "function_call",
+					CallID: tcPayload.Call.ID,
+					Name:   tcPayload.Call.Function.Name,
+					Args:   tcPayload.Call.Function.Arguments,
+				})
+			case messaging.TypeToolResult:
+				var trPayload messaging.ToolResultPayload
+				if err := msg.DecodePayload(&trPayload); err != nil {
+					continue
+				}
+				agenticItems = append(agenticItems, response.OutputItem{
+					Type:   "function_call_output",
+					CallID: trPayload.CallID,
+					Output: trPayload.Output,
+				})
+			}
 		case redisMsg := <-sub.Channel():
 			if redisMsg == nil {
 				continue
@@ -255,7 +324,11 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 			}
 
 			if token.Done {
-				outputItems := textToOutputItems(fullContent)
+				// Storage keeps the full agentic trace; client-facing SSE
+				// event only includes the final assistant text.
+				var outputItems []response.OutputItem
+				outputItems = append(outputItems, agenticItems...)
+				outputItems = append(outputItems, textToOutputItems(fullContent)...)
 
 				if store {
 					turnInput := currentTurnInput(inputItems)
@@ -283,7 +356,7 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 					Model:              model,
 					SessionID:          sessionID,
 					PreviousResponseID: previousResponseID,
-					Output:             outputItems,
+					Output:             clientFacingOutput(outputItems),
 					Status:             response.StatusCompleted,
 				}
 				data, _ := json.Marshal(map[string]any{
@@ -461,6 +534,14 @@ func (s *Server) writeStitchIndex(ctx context.Context, sessionID, correlationID 
 func inputItemsToMessages(items []response.InputItem) []messaging.ChatMsg {
 	var msgs []messaging.ChatMsg
 	for _, item := range items {
+		if item.Type == "function_call_output" {
+			msgs = append(msgs, messaging.ChatMsg{
+				Role:       "tool",
+				Content:    item.Output,
+				ToolCallID: item.CallID,
+			})
+			continue
+		}
 		role := item.Role
 		if role == "" {
 			role = "user"
@@ -475,20 +556,57 @@ func chainToMessages(chain []*response.Response) []messaging.ChatMsg {
 	for _, resp := range chain {
 		msgs = append(msgs, inputItemsToMessages(resp.Input)...)
 		for _, out := range resp.Output {
-			if out.Type == "message" && out.Role == "assistant" {
-				var text string
-				for _, part := range out.Content {
-					if part.Type == "output_text" || part.Type == "text" {
-						text += part.Text
+			switch out.Type {
+			case "function_call":
+				msgs = append(msgs, messaging.ChatMsg{
+					Role: "assistant",
+					ToolCalls: []messaging.ToolCall{{
+						ID:   out.CallID,
+						Type: "function",
+						Function: messaging.ToolCallFunction{
+							Name:      out.Name,
+							Arguments: out.Args,
+						},
+					}},
+				})
+			case "function_call_output":
+				msgs = append(msgs, messaging.ChatMsg{
+					Role:       "tool",
+					Content:    out.Output,
+					ToolCallID: out.CallID,
+				})
+			case "message":
+				if out.Role == "assistant" {
+					var text string
+					for _, part := range out.Content {
+						if part.Type == "output_text" || part.Type == "text" {
+							text += part.Text
+						}
 					}
-				}
-				if text != "" {
-					msgs = append(msgs, messaging.ChatMsg{Role: "assistant", Content: text})
+					if text != "" {
+						msgs = append(msgs, messaging.ChatMsg{Role: "assistant", Content: text})
+					}
 				}
 			}
 		}
 	}
 	return msgs
+}
+
+// clientFacingOutput returns a copy of items with server-internal
+// function_call and function_call_output items removed. The client didn't
+// opt in to tool calling (tools are server-configured built-ins), so the
+// internal agent loop's trace is hidden from API responses. Stored responses
+// retain the full trace for the dashboard's session-history view.
+func clientFacingOutput(items []response.OutputItem) []response.OutputItem {
+	out := make([]response.OutputItem, 0, len(items))
+	for _, it := range items {
+		if it.Type == "function_call" || it.Type == "function_call_output" {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 func textToOutputItems(content string) []response.OutputItem {

@@ -61,3 +61,11 @@ func DefaultRetroConfig() RetroConfig {
 		CurationCategories: []string{"preference", "fact", "context", "skill"},
 	}
 }
+
+type MCPServerConfig struct {
+	Name    string            `json:"name"`
+	Enabled bool              `json:"enabled"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+}

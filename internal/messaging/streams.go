@@ -6,6 +6,7 @@ const (
 	StreamAgentRequests    = "stream:agent:%s:requests"
 
 	ChannelTokens    = "channel:tokens:%s"
+	ChannelToolCalls = "channel:tool-calls:%s"
 	ChannelHeartbeat = "channel:heartbeat:%s"
 	ChannelPreempt   = "channel:agent:%s:preempt"
 	ChannelEvents    = "channel:events"

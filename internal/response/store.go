@@ -38,6 +38,7 @@ type OutputItem struct {
 	CallID  string        `json:"call_id,omitempty"`
 	Name    string        `json:"name,omitempty"`
 	Args    string        `json:"arguments,omitempty"`
+	Output  string        `json:"output,omitempty"`
 }
 
 type ContentPart struct {
@@ -262,6 +263,8 @@ func (s *Store) GetSessionHistory(ctx context.Context, sessionID string) ([]*Res
 
 // GetSessionMessages returns the conversation for a session as ChatMsg pairs,
 // suitable for feeding directly into context assembly or retro job processing.
+// function_call / function_call_output items are preserved as assistant
+// messages with tool_calls and tool role messages with tool_call_id.
 func (s *Store) GetSessionMessages(ctx context.Context, sessionID string) ([]messaging.ChatMsg, error) {
 	responses, err := s.GetSessionHistory(ctx, sessionID)
 	if err != nil {
@@ -271,6 +274,14 @@ func (s *Store) GetSessionMessages(ctx context.Context, sessionID string) ([]mes
 	var msgs []messaging.ChatMsg
 	for _, resp := range responses {
 		for _, item := range resp.Input {
+			if item.Type == "function_call_output" {
+				msgs = append(msgs, messaging.ChatMsg{
+					Role:       "tool",
+					Content:    item.Output,
+					ToolCallID: item.CallID,
+				})
+				continue
+			}
 			role := item.Role
 			if role == "" {
 				role = "user"
@@ -282,10 +293,31 @@ func (s *Store) GetSessionMessages(ctx context.Context, sessionID string) ([]mes
 			msgs = append(msgs, messaging.ChatMsg{Role: role, Content: content})
 		}
 		for _, out := range resp.Output {
-			if out.Type == "message" && out.Role == "assistant" {
-				text := FlattenContent(out.Content)
-				if text != "" {
-					msgs = append(msgs, messaging.ChatMsg{Role: "assistant", Content: text})
+			switch out.Type {
+			case "function_call":
+				msgs = append(msgs, messaging.ChatMsg{
+					Role: "assistant",
+					ToolCalls: []messaging.ToolCall{{
+						ID:   out.CallID,
+						Type: "function",
+						Function: messaging.ToolCallFunction{
+							Name:      out.Name,
+							Arguments: out.Args,
+						},
+					}},
+				})
+			case "function_call_output":
+				msgs = append(msgs, messaging.ChatMsg{
+					Role:       "tool",
+					Content:    out.Output,
+					ToolCallID: out.CallID,
+				})
+			case "message":
+				if out.Role == "assistant" {
+					text := FlattenContent(out.Content)
+					if text != "" {
+						msgs = append(msgs, messaging.ChatMsg{Role: "assistant", Content: text})
+					}
 				}
 			}
 		}
