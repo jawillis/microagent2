@@ -16,6 +16,7 @@ import (
 
 	"microagent2/internal/agent"
 	"microagent2/internal/config"
+	"microagent2/internal/execclient"
 	"microagent2/internal/logstream"
 	"microagent2/internal/mcp"
 	"microagent2/internal/messaging"
@@ -81,6 +82,17 @@ func main() {
 		logger.Error("register current_time", "error", err)
 		os.Exit(1)
 	}
+
+	execAddr := envOr("EXEC_ADDR", "http://exec:8085")
+	execMaxTimeoutS := envInt("EXEC_MAX_TIMEOUT_S", 120)
+	execClient := execclient.New(execAddr,
+		execclient.WithTimeout(time.Duration(execMaxTimeoutS+10)*time.Second),
+	)
+	if err := toolRegistry.Register(tools.NewRunSkillScript(execClient, logger)); err != nil {
+		logger.Error("register run_skill_script", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("exec_client_configured", "addr", execAddr, "timeout_s", execMaxTimeoutS+10)
 
 	cfgStore := config.NewStore(client.Redis())
 	mcpServers := config.ResolveMCPServers(ctx, cfgStore, logger)
@@ -206,6 +218,14 @@ func handleRequest(ctx context.Context, d *requestDeps, msg *messaging.Message) 
 	for ; iter < d.maxIter; iter++ {
 		toolSchemas := d.registry.SchemasFor(d.baseTools, allowedOf(activeSkill))
 		visible := visibleSet(d.registry, d.baseTools, activeSkill)
+		d.logger.Info("turn_iteration_start",
+			"correlation_id", correlationID,
+			"iter", iter,
+			"tool_schema_count", len(toolSchemas),
+			"visible_set_size", len(visible),
+			"active_skill", activeName,
+			"message_count", len(messages),
+		)
 
 		slotID, err := d.runtime.RequestSlotWithCorrelation(ctx, correlationID)
 		if err != nil {
@@ -244,7 +264,7 @@ func handleRequest(ctx context.Context, d *requestDeps, msg *messaging.Message) 
 
 		for _, call := range toolCalls {
 			invStart := time.Now()
-			output, elapsedMS, resultBytes, outcome := d.invokeOrGate(ctx, call, visible, activeName)
+			output, elapsedMS, resultBytes, outcome := d.invokeOrGate(ctx, call, visible, activeName, payload.SessionID)
 
 			d.logger.Info("tool_invoked",
 				"correlation_id", correlationID,
@@ -375,13 +395,33 @@ func (d *requestDeps) warnUnknownAllowedTools(correlationID, activeName string, 
 
 // invokeOrGate either invokes the tool or emits a gated error envelope.
 // Returns (output, elapsed_ms, result_bytes, outcome).
-func (d *requestDeps) invokeOrGate(ctx context.Context, call messaging.ToolCall, visible map[string]struct{}, activeName string) (string, int64, int, string) {
+func (d *requestDeps) invokeOrGate(ctx context.Context, call messaging.ToolCall, visible map[string]struct{}, activeName, sessionID string) (string, int64, int, string) {
 	if _, ok := visible[call.Function.Name]; !ok {
 		envelope := fmt.Sprintf(`{"error":"tool not available under active skill: %s"}`, call.Function.Name)
 		return envelope, 0, len(envelope), "gated"
 	}
-	res, _ := d.registry.Invoke(ctx, call.Function.Name, call.Function.Arguments)
+	args := call.Function.Arguments
+	if call.Function.Name == "run_skill_script" {
+		args = injectSessionID(args, sessionID)
+	}
+	res, _ := d.registry.Invoke(ctx, call.Function.Name, args)
 	return res.Output, res.ElapsedMS, res.ResultSize, res.Outcome
+}
+
+// injectSessionID rewrites the JSON object to set session_id = sessionID,
+// overriding any model-supplied value. A malformed argsJSON is returned
+// unchanged; argument validation is the tool's responsibility.
+func injectSessionID(argsJSON, sessionID string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil || m == nil {
+		return argsJSON
+	}
+	m["session_id"] = sessionID
+	b, err := json.Marshal(m)
+	if err != nil {
+		return argsJSON
+	}
+	return string(b)
 }
 
 // visibleSet computes base ∪ activeSkill.allowed-tools, restricted to names

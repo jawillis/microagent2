@@ -53,10 +53,13 @@ func TestHandleRequest_ToolLoopRunsTwoIterations(t *testing.T) {
 	if err := reg.Register(tools.NewCurrentTime()); err != nil {
 		t.Fatal(err)
 	}
+	if err := reg.Register(tools.NewRunSkillScript(nil, logger)); err != nil {
+		t.Fatal(err)
+	}
 
-	// Schema order must be list_skills, read_skill, read_skill_file, current_time.
+	// Schema order: list_skills, read_skill, read_skill_file, current_time, run_skill_script.
 	schemas := reg.Schemas()
-	wantOrder := []string{"list_skills", "read_skill", "read_skill_file", "current_time"}
+	wantOrder := []string{"list_skills", "read_skill", "read_skill_file", "current_time", "run_skill_script"}
 	if len(schemas) != len(wantOrder) {
 		t.Fatalf("schemas len = %d, want %d", len(schemas), len(wantOrder))
 	}

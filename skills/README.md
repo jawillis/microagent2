@@ -74,6 +74,26 @@ An active skill with an empty `allowed-tools` narrows to the base only — handy
 
 Active skill state is stored in Valkey at `session:<session_id>:active-skill` with a 24h TTL. It persists across turns within a session and is cleared automatically when a new skill is loaded or when the stored skill is no longer present on disk.
 
+## Running skill scripts
+
+Skills that ship executables under `scripts/` can be invoked by the model via
+the `run_skill_script` built-in tool. The tool calls the `exec` service's
+`/v1/run` endpoint, returning a JSON envelope with `exit_code`, `stdout`,
+`stderr`, `workspace_dir`, `outputs`, and `duration_ms`. Example request:
+
+```json
+{
+  "skill": "mcp-builder",
+  "script": "scripts/evaluation.py",
+  "args": ["--target", "github"],
+  "timeout_s": 60
+}
+```
+
+`session_id` is always populated by main-agent from the turn's session;
+model-supplied values are overridden. First invocation for a skill may
+include dependency-install latency unless prewarm is set (see below).
+
 ## Prewarm (exec service)
 
 Skills that ship executable helpers under `scripts/` can opt into dependency

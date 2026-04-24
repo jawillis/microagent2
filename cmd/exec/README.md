@@ -7,6 +7,14 @@ research runs, and self-improvement evaluation harnesses. The contract
 lives in `openspec/specs/code-execution/spec.md`; the broader rationale is
 in `docs/skills-runtime-design.md`.
 
+## Who calls this service
+
+Main-agent's `run_skill_script` built-in tool (see
+`internal/tools/run_skill_script.go`) is the primary client. Operators
+curl the endpoints directly only for smoke tests and diagnostics. The
+service has no authentication; the `microagent` compose network is the
+trust boundary.
+
 ## HTTP API
 
 ```

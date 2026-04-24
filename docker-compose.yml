@@ -161,12 +161,16 @@ services:
       - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
       - SKILLS_DIR=/app/skills
       - TOOL_LOOP_MAX_ITER=${TOOL_LOOP_MAX_ITER:-10}
+      - EXEC_ADDR=http://exec:8085
+      - EXEC_MAX_TIMEOUT_S=${EXEC_MAX_TIMEOUT_S:-120}
     volumes:
       - ./skills:/app/skills:ro
     depends_on:
       valkey:
         condition: service_healthy
       llm-broker:
+        condition: service_started
+      exec:
         condition: service_started
     networks:
       - microagent

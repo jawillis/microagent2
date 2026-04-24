@@ -6,15 +6,19 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 
 	"microagent2/internal/agent"
+	"microagent2/internal/execclient"
 	"microagent2/internal/messaging"
 	"microagent2/internal/sessionskill"
 	"microagent2/internal/skills"
@@ -140,8 +144,9 @@ func buildDeps(client *messaging.Client, reg *tools.Registry, store *skills.Stor
 	}
 }
 
-// registerBuiltinsPlusCustom registers the four built-ins and optional extra
-// tools, returning the registry.
+// registerBuiltinsPlusCustom registers the core built-ins and optional extra
+// tools, returning the registry. run_skill_script is NOT registered here so
+// tests that exercise it can pass their own mocked client.
 func registerBuiltinsPlusCustom(t *testing.T, store *skills.Store, logger *slog.Logger, extras ...tools.Tool) *tools.Registry {
 	t.Helper()
 	reg := tools.NewRegistry(logger)
@@ -502,5 +507,276 @@ func TestGating_StaleActiveSkillCleared(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "skill_missing_from_store") {
 		t.Fatalf("expected transition log; got:\n%s", buf.String())
+	}
+}
+
+// --- skills-script-execution tests ---
+
+func TestInjectSessionID_Injects(t *testing.T) {
+	out := injectSessionID(`{"skill":"x","script":"y"}`, "sess-abc")
+	var m map[string]any
+	_ = json.Unmarshal([]byte(out), &m)
+	if m["session_id"] != "sess-abc" {
+		t.Fatalf("got %+v", m)
+	}
+	if m["skill"] != "x" || m["script"] != "y" {
+		t.Fatalf("original fields lost: %+v", m)
+	}
+}
+
+func TestInjectSessionID_OverridesExisting(t *testing.T) {
+	out := injectSessionID(`{"skill":"x","script":"y","session_id":"model-value"}`, "real-sess")
+	var m map[string]any
+	_ = json.Unmarshal([]byte(out), &m)
+	if m["session_id"] != "real-sess" {
+		t.Fatalf("override failed; got %q", m["session_id"])
+	}
+}
+
+func TestInjectSessionID_MalformedPassesThrough(t *testing.T) {
+	in := `not json at all`
+	if got := injectSessionID(in, "sess"); got != in {
+		t.Fatalf("malformed should pass through; got %q", got)
+	}
+}
+
+// captureExec spins up an httptest server that records every request body
+// and always returns the given envelope. The returned function stops the
+// server; the returned slice captures request bodies in call order.
+func captureExec(t *testing.T, envelope string) (*execclient.Client, *sync.Mutex, *[]execclient.RunRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var captured []execclient.RunRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/run" {
+			http.NotFound(w, r)
+			return
+		}
+		var req execclient.RunRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		captured = append(captured, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(envelope))
+	}))
+	t.Cleanup(srv.Close)
+	return execclient.New(srv.URL, execclient.WithTimeout(5*time.Second)), &mu, &captured
+}
+
+func TestRunSkillScript_EnvelopeReturnsInToolResult(t *testing.T) {
+	envelope := `{"exit_code":0,"stdout":"from-exec\n","stdout_truncated":false,"stderr":"","stderr_truncated":false,"workspace_dir":"/workspace/s/i","outputs":[],"duration_ms":5,"timed_out":false,"install_duration_ms":0}`
+	client, _, _ := captureExec(t, envelope)
+
+	harnessClient, logger, _, cleanup := newTestHarness(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	skillsRoot := t.TempDir()
+	store := skills.NewStore(skillsRoot, logger)
+	reg := registerBuiltinsPlusCustom(t, store, logger, tools.NewRunSkillScript(client, logger))
+
+	deps := &requestDeps{
+		client:    harnessClient,
+		runtime:   agent.NewRuntime(harnessClient, "main-agent", 0, false, logger),
+		registry:  reg,
+		store:     store,
+		rdb:       harnessClient.Redis(),
+		baseTools: []string{"list_skills", "read_skill", "read_skill_file", "current_time", "run_skill_script"},
+		maxIter:   5,
+		logger:    logger,
+	}
+
+	steps := []scriptStep{
+		{toolCalls: []messaging.ToolCall{{
+			ID:   "c1",
+			Type: "function",
+			Function: messaging.ToolCallFunction{
+				Name:      "run_skill_script",
+				Arguments: `{"skill":"any","script":"scripts/x.py"}`,
+			},
+		}}},
+		{finalText: "done"},
+	}
+	brokerDone := runStubBroker(ctx, t, harnessClient, steps)
+
+	req := buildPayload("sess-envelope")
+	var payload messaging.ContextAssembledPayload
+	_ = json.Unmarshal(req.Payload, &payload)
+	handleRequest(ctx, deps, req)
+
+	select {
+	case <-brokerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("broker timeout")
+	}
+
+	_ = harnessClient.EnsureGroup(ctx, payload.ReplyStream, "cg:reader-env")
+	msgs, _, err := harnessClient.ReadGroup(ctx, payload.ReplyStream, "cg:reader-env", "r", 1, 1*time.Second)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("no reply: err=%v", err)
+	}
+	var resp messaging.ChatResponsePayload
+	if err := msgs[0].DecodePayload(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolResults) != 1 {
+		t.Fatalf("tool_results = %d", len(resp.ToolResults))
+	}
+	if !strings.Contains(resp.ToolResults[0].Output, `"from-exec`) {
+		t.Fatalf("envelope missing from tool-result: %q", resp.ToolResults[0].Output)
+	}
+}
+
+func TestRunSkillScript_SessionIDInjected(t *testing.T) {
+	envelope := `{"exit_code":0,"stdout":"","stdout_truncated":false,"stderr":"","stderr_truncated":false,"workspace_dir":"","outputs":[],"duration_ms":1,"timed_out":false,"install_duration_ms":0}`
+	client, mu, captured := captureExec(t, envelope)
+
+	harnessClient, logger, _, cleanup := newTestHarness(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	skillsRoot := t.TempDir()
+	store := skills.NewStore(skillsRoot, logger)
+	reg := registerBuiltinsPlusCustom(t, store, logger, tools.NewRunSkillScript(client, logger))
+
+	deps := &requestDeps{
+		client:    harnessClient,
+		runtime:   agent.NewRuntime(harnessClient, "main-agent", 0, false, logger),
+		registry:  reg,
+		store:     store,
+		rdb:       harnessClient.Redis(),
+		baseTools: []string{"list_skills", "read_skill", "read_skill_file", "current_time", "run_skill_script"},
+		maxIter:   5,
+		logger:    logger,
+	}
+
+	// Model passes a misleading session_id; main-agent must override it.
+	steps := []scriptStep{
+		{toolCalls: []messaging.ToolCall{{
+			ID:   "c1",
+			Type: "function",
+			Function: messaging.ToolCallFunction{
+				Name:      "run_skill_script",
+				Arguments: `{"skill":"x","script":"y","session_id":"attacker-choice"}`,
+			},
+		}}},
+		{finalText: "done"},
+	}
+	brokerDone := runStubBroker(ctx, t, harnessClient, steps)
+	handleRequest(ctx, deps, buildPayload("real-session"))
+	<-brokerDone
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*captured) != 1 {
+		t.Fatalf("expected 1 exec call, got %d", len(*captured))
+	}
+	if got := (*captured)[0].SessionID; got != "real-session" {
+		t.Errorf("exec saw session_id %q, want real-session (model tried to inject %q)", got, "attacker-choice")
+	}
+}
+
+func TestRunSkillScript_ExecUnavailableSurfacedToModel(t *testing.T) {
+	// Client pointing at nothing.
+	client := execclient.New("http://127.0.0.1:1", execclient.WithTimeout(500*time.Millisecond))
+
+	harnessClient, logger, _, cleanup := newTestHarness(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	skillsRoot := t.TempDir()
+	store := skills.NewStore(skillsRoot, logger)
+	reg := registerBuiltinsPlusCustom(t, store, logger, tools.NewRunSkillScript(client, logger))
+
+	deps := &requestDeps{
+		client:    harnessClient,
+		runtime:   agent.NewRuntime(harnessClient, "main-agent", 0, false, logger),
+		registry:  reg,
+		store:     store,
+		rdb:       harnessClient.Redis(),
+		baseTools: []string{"list_skills", "read_skill", "read_skill_file", "current_time", "run_skill_script"},
+		maxIter:   5,
+		logger:    logger,
+	}
+
+	steps := []scriptStep{
+		{toolCalls: []messaging.ToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: messaging.ToolCallFunction{Name: "run_skill_script", Arguments: `{"skill":"x","script":"y"}`},
+		}}},
+		{finalText: "done"},
+	}
+	brokerDone := runStubBroker(ctx, t, harnessClient, steps)
+
+	req := buildPayload("sess-unavail")
+	var payload messaging.ContextAssembledPayload
+	_ = json.Unmarshal(req.Payload, &payload)
+	handleRequest(ctx, deps, req)
+	<-brokerDone
+
+	_ = harnessClient.EnsureGroup(ctx, payload.ReplyStream, "cg:reader-unavail")
+	msgs, _, err := harnessClient.ReadGroup(ctx, payload.ReplyStream, "cg:reader-unavail", "r", 1, 1*time.Second)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("no reply: err=%v", err)
+	}
+	var resp messaging.ChatResponsePayload
+	_ = msgs[0].DecodePayload(&resp)
+	if len(resp.ToolResults) != 1 {
+		t.Fatalf("tool_results = %d", len(resp.ToolResults))
+	}
+	if !strings.Contains(resp.ToolResults[0].Output, "exec unavailable") {
+		t.Fatalf("expected exec-unavailable envelope; got %q", resp.ToolResults[0].Output)
+	}
+}
+
+func TestRunSkillScript_OtherToolsUnaffectedBySessionInject(t *testing.T) {
+	// Confirms injectSessionID is only applied to run_skill_script calls.
+	// Calling list_skills should not have session_id in its args.
+	harnessClient, logger, _, cleanup := newTestHarness(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	skillsRoot := t.TempDir()
+	store := skills.NewStore(skillsRoot, logger)
+	reg := registerBuiltinsPlusCustom(t, store, logger)
+
+	deps := buildDeps(harnessClient, reg, store, logger)
+
+	steps := []scriptStep{
+		{toolCalls: []messaging.ToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: messaging.ToolCallFunction{Name: "list_skills", Arguments: "{}"},
+		}}},
+		{finalText: "done"},
+	}
+	brokerDone := runStubBroker(ctx, t, harnessClient, steps)
+
+	req := buildPayload("sess-other")
+	var payload messaging.ContextAssembledPayload
+	_ = json.Unmarshal(req.Payload, &payload)
+	handleRequest(ctx, deps, req)
+	<-brokerDone
+
+	_ = harnessClient.EnsureGroup(ctx, payload.ReplyStream, "cg:reader-other")
+	msgs, _, err := harnessClient.ReadGroup(ctx, payload.ReplyStream, "cg:reader-other", "r", 1, 1*time.Second)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("no reply")
+	}
+	var resp messaging.ChatResponsePayload
+	_ = msgs[0].DecodePayload(&resp)
+	// list_skills returns `[]` for empty stores; no session_id muddle.
+	if resp.ToolResults[0].Output != "[]" {
+		t.Fatalf("list_skills output = %q, want []", resp.ToolResults[0].Output)
 	}
 }
