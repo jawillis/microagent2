@@ -65,6 +65,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 
 	type historyResult struct {
 		history []messaging.ChatMsg
+		source  string
 		err     error
 	}
 	type memoryResult struct {
@@ -77,8 +78,22 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	memCh := make(chan memoryResult, 1)
 
 	go func() {
-		h, err := m.getSessionHistory(ctx, payload.SessionID)
-		histCh <- historyResult{h, err}
+		// Canonical history lives in the response store, keyed by session_id.
+		// If the store has something for this session, it's authoritative.
+		// Otherwise the client is in "client-side state" mode (e.g. Open WebUI,
+		// which sends full history in the input every turn and mints no chain
+		// on our side), and we treat payload.Messages[:-1] as the history for
+		// this turn.
+		canonical, err := m.getSessionHistory(ctx, payload.SessionID)
+		if err == nil && len(canonical) > 0 {
+			histCh <- historyResult{history: canonical, source: "store"}
+			return
+		}
+		if err != nil {
+			histCh <- historyResult{err: err}
+			return
+		}
+		histCh <- historyResult{history: payload.Messages[:len(payload.Messages)-1], source: "payload"}
 	}()
 
 	go func() {
@@ -97,6 +112,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 			"correlation_id", correlationID,
 			"session_id", payload.SessionID,
 			"history_count", len(hr.history),
+			"source", hr.source,
 		)
 	}
 	if mr.err != nil {

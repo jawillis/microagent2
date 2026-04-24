@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"microagent2/internal/messaging"
@@ -187,6 +188,26 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 	defer sub.Close()
 	s.logger.Info("gateway_stream_subscribed", "correlation_id", correlationID, "session_id", sessionID)
 
+	// Emit response.created first so clients can capture the id immediately
+	// and thread subsequent turns via previous_response_id.
+	createdEvent := responsesResponse{
+		ID:                 responseID,
+		Object:             "response",
+		CreatedAt:          time.Now().Unix(),
+		Model:              model,
+		SessionID:          sessionID,
+		PreviousResponseID: previousResponseID,
+		Output:             []response.OutputItem{},
+		Status:             response.StatusInProgress,
+	}
+	if data, err := json.Marshal(map[string]any{
+		"type":     "response.created",
+		"response": createdEvent,
+	}); err == nil {
+		fmt.Fprintf(w, "event: response.created\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
 	var fullContent string
 	firstTokenSeen := false
 
@@ -326,19 +347,42 @@ func inputItemsToMessages(items []response.InputItem) []messaging.ChatMsg {
 		if role == "" {
 			role = "user"
 		}
-		content := ""
-		switch c := item.Content.(type) {
-		case string:
-			content = c
-		default:
-			if c != nil {
-				data, _ := json.Marshal(c)
-				content = string(data)
-			}
-		}
-		msgs = append(msgs, messaging.ChatMsg{Role: role, Content: content})
+		msgs = append(msgs, messaging.ChatMsg{Role: role, Content: flattenContent(item.Content)})
 	}
 	return msgs
+}
+
+// flattenContent reduces the OpenAI Responses API content field to plain text.
+// The field can be a bare string, or an array of content parts of the form
+// [{"type":"input_text","text":"..."}, ...] / [{"type":"output_text","text":"..."}].
+// We concatenate the text from each part with a single space.
+func flattenContent(raw any) string {
+	switch c := raw.(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, p := range c {
+			m, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			if t != "" && t != "input_text" && t != "output_text" && t != "text" {
+				continue
+			}
+			text, _ := m["text"].(string)
+			if text == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(text)
+		}
+		return b.String()
+	}
+	return ""
 }
 
 func chainToMessages(chain []*response.Response) []messaging.ChatMsg {
