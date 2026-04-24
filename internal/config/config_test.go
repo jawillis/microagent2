@@ -134,13 +134,17 @@ func TestResolveRetro_Defaults(t *testing.T) {
 	if len(cfg.CurationCategories) != 4 {
 		t.Errorf("CurationCategories len = %d, want 4", len(cfg.CurationCategories))
 	}
+	if cfg.CurationRecallLimit != 15 {
+		t.Errorf("CurationRecallLimit = %d, want 15", cfg.CurationRecallLimit)
+	}
 }
 
 func TestResolveRetro_ValkeyOverrides(t *testing.T) {
 	store, mr := testStore(t)
 	data, _ := json.Marshal(map[string]any{
-		"inactivity_timeout_s": 600,
-		"curation_categories":  []string{"preference", "fact"},
+		"inactivity_timeout_s":  600,
+		"curation_categories":   []string{"preference", "fact"},
+		"curation_recall_limit": 25,
 	})
 	mr.Set(KeyRetro, string(data))
 
@@ -151,6 +155,19 @@ func TestResolveRetro_ValkeyOverrides(t *testing.T) {
 	}
 	if len(cfg.CurationCategories) != 2 {
 		t.Errorf("CurationCategories len = %d, want 2", len(cfg.CurationCategories))
+	}
+	if cfg.CurationRecallLimit != 25 {
+		t.Errorf("CurationRecallLimit = %d, want 25", cfg.CurationRecallLimit)
+	}
+}
+
+func TestResolveRetro_EnvOverridesRecallLimit(t *testing.T) {
+	t.Setenv("RETRO_CURATION_RECALL_LIMIT", "8")
+	store, _ := testStore(t)
+	cfg := ResolveRetro(context.Background(), store)
+
+	if cfg.CurationRecallLimit != 8 {
+		t.Errorf("CurationRecallLimit = %d, want 8 (from env)", cfg.CurationRecallLimit)
 	}
 }
 

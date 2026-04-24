@@ -30,10 +30,10 @@ type Server struct {
 	requestTimeoutS int
 	gatewayPort     string
 	llamaAddr       string
-	muninnAddr      string
+	memoryAddr      string
 }
 
-func New(client *messaging.Client, logger *slog.Logger, configStore *config.Store, responses *response.Store, requestTimeoutS int, gatewayPort, llamaAddr, muninnAddr string) *Server {
+func New(client *messaging.Client, logger *slog.Logger, configStore *config.Store, responses *response.Store, requestTimeoutS int, gatewayPort, llamaAddr, memoryAddr string) *Server {
 	s := &Server{
 		client:          client,
 		logger:          logger,
@@ -43,7 +43,7 @@ func New(client *messaging.Client, logger *slog.Logger, configStore *config.Stor
 		requestTimeoutS: requestTimeoutS,
 		gatewayPort:     gatewayPort,
 		llamaAddr:       llamaAddr,
-		muninnAddr:      muninnAddr,
+		memoryAddr:      memoryAddr,
 	}
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
@@ -573,7 +573,7 @@ type statusResponse struct {
 type systemInfo struct {
 	GatewayPort string `json:"gateway_port"`
 	LlamaAddr   string `json:"llama_addr"`
-	MuninnAddr  string `json:"muninn_addr"`
+	MemoryAddr  string `json:"memory_addr"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -582,7 +582,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	services := []ServiceHealth{
 		checkValkey(ctx, s),
 		checkHTTPService(ctx, "llama.cpp", s.llamaAddr+"/health", 5*time.Second),
-		checkHTTPService(ctx, "muninndb", s.muninnAddr+"/api/health", 5*time.Second),
+		checkHTTPService(ctx, "memory-service", s.memoryAddr+"/health", 5*time.Second),
 	}
 
 	registered, err := registry.ListRegistered(ctx, s.client.Redis())
@@ -610,7 +610,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		System: systemInfo{
 			GatewayPort: s.gatewayPort,
 			LlamaAddr:   s.llamaAddr,
-			MuninnAddr:  s.muninnAddr,
+			MemoryAddr:  s.memoryAddr,
 		},
 		MCPServers: readMCPHealth(r, s.client.Redis()),
 	}

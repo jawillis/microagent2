@@ -451,11 +451,19 @@ func (b *Broker) IsPreemptible(agentID string) bool {
 }
 
 type chatCompletionRequest struct {
-	Model      string                `json:"model"`
-	Messages   []messaging.ChatMsg   `json:"messages"`
-	Stream     bool                  `json:"stream"`
+	Model      string                 `json:"model"`
+	Messages   []messaging.ChatMsg    `json:"messages"`
+	Stream     bool                   `json:"stream"`
 	Tools      []messaging.ToolSchema `json:"tools,omitempty"`
-	ToolChoice string                `json:"tool_choice,omitempty"`
+	ToolChoice string                 `json:"tool_choice,omitempty"`
+	// IDSlot is a llama.cpp extension to the OpenAI chat completions API
+	// that pins the request to a specific llama-server KV slot. Without it,
+	// llama.cpp's scheduler picks a slot via prompt-prefix matching; with
+	// it, we deterministically land each logical slot (our broker's
+	// SlotTable) on the same llama-server KV slot so cache locality
+	// actually materializes. Always sent; broker validates that SlotID is
+	// a legitimate slot before proxying.
+	IDSlot int `json:"id_slot"`
 }
 
 type chatCompletionResponse struct {
@@ -512,6 +520,7 @@ func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []mes
 			Stream:     stream,
 			Tools:      tools,
 			ToolChoice: toolChoice,
+			IDSlot:     slotID,
 		})
 		if err != nil {
 			errCh <- err

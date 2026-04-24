@@ -19,11 +19,35 @@ import (
 	"microagent2/internal/broker"
 	appcontext "microagent2/internal/context"
 	"microagent2/internal/gateway"
+	"microagent2/internal/memoryclient"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
 	"microagent2/internal/response"
 	"microagent2/internal/retro"
 )
+
+// newFakeMemoryService returns an httptest server that speaks the memory-service
+// API. memories (optional) pre-populate the /recall response.
+func newFakeMemoryService(memories []memoryclient.MemorySummary) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			fmt.Fprint(w, `{"status":"ok","hindsight":"reachable","bank":"microagent2"}`)
+		case "/recall":
+			resp := memoryclient.RecallResponse{Memories: memories}
+			_ = json.NewEncoder(w).Encode(resp)
+		case "/retain":
+			_ = json.NewEncoder(w).Encode(memoryclient.RetainResponse{Success: true, BankID: "microagent2", ItemsCount: 1})
+		case "/reflect":
+			_ = json.NewEncoder(w).Encode(memoryclient.ReflectResponse{Text: ""})
+		case "/forget":
+			_ = json.NewEncoder(w).Encode(memoryclient.ForgetResponse{DeletedID: ""})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
 
 var testLogger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 
@@ -55,13 +79,9 @@ func TestEndToEnd(t *testing.T) {
 	defer llamaServer.Close()
 	llamaAddr := strings.TrimPrefix(llamaServer.URL, "http://")
 
-	// Start a mock MuninnDB that returns no memories
-	muninnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, "[]")
-	}))
-	defer muninnServer.Close()
-	muninnAddr := strings.TrimPrefix(muninnServer.URL, "http://")
+	// Start a fake memory-service that returns no memories.
+	memSrv := newFakeMemoryService(nil)
+	defer memSrv.Close()
 
 	// Set up broker
 	reg := registry.NewRegistry()
@@ -70,9 +90,9 @@ func TestEndToEnd(t *testing.T) {
 
 	// Set up context manager
 	respStore := response.NewStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
+	mc := memoryclient.New(memSrv.URL)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
-	mgr := appcontext.NewManager(client, respStore, muninn, assembler, testLogger, 5, 3)
+	mgr := appcontext.NewManager(client, respStore, mc, assembler, testLogger, 5, 3)
 	go mgr.Run(ctx)
 
 	// Register main agent
@@ -376,20 +396,14 @@ func TestMemoryInjection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Mock MuninnDB that returns stored memories
-	muninnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/activate" {
-			fmt.Fprint(w, `{"activations":[{"content":"User prefers dark mode","concept":"preference","score":0.92,"summary":"recalled from preference"}]}`)
-		} else {
-			fmt.Fprint(w, `{"status":"ok"}`)
-		}
-	}))
-	defer muninnServer.Close()
-	muninnAddr := strings.TrimPrefix(muninnServer.URL, "http://")
+	// Fake memory-service pre-seeded with a single recall result.
+	memSrv := newFakeMemoryService([]memoryclient.MemorySummary{
+		{ID: "m1", Content: "User prefers dark mode", Score: 0.92, Tags: []string{"preferences"}},
+	})
+	defer memSrv.Close()
 
 	respStore := response.NewStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
+	mc := memoryclient.New(memSrv.URL)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
 
 	// Store session history via response objects
@@ -408,12 +422,16 @@ func TestMemoryInjection(t *testing.T) {
 	}
 
 	// Assemble context with memory recall
-	memories, err := muninn.Recall(ctx, "dark mode", 5)
+	recall, err := mc.Recall(ctx, memoryclient.RecallRequest{Query: "dark mode", Limit: 5})
 	if err != nil {
 		t.Fatalf("recall: %v", err)
 	}
-	if len(memories) == 0 {
-		t.Fatal("expected memories from mock MuninnDB")
+	if len(recall.Memories) == 0 {
+		t.Fatal("expected memories from fake memory-service")
+	}
+	memories := make([]appcontext.Memory, 0, len(recall.Memories))
+	for _, m := range recall.Memories {
+		memories = append(memories, appcontext.Memory{ID: m.ID, Content: m.Content, Score: m.Score, Tags: m.Tags})
 	}
 
 	history, err := respStore.GetSessionMessages(ctx, sessionID)
@@ -525,21 +543,17 @@ func TestTwoTurnResponsesNoSlotLeak(t *testing.T) {
 	defer llamaServer.Close()
 	llamaAddr := strings.TrimPrefix(llamaServer.URL, "http://")
 
-	muninnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"activations":[]}`)
-	}))
-	defer muninnServer.Close()
-	muninnAddr := strings.TrimPrefix(muninnServer.URL, "http://")
+	memSrv := newFakeMemoryService(nil)
+	defer memSrv.Close()
 
 	reg := registry.NewRegistry()
 	b := broker.New(client, reg, testLogger, llamaAddr, "", "test", 2, 5*time.Second, 2*time.Second, 30*time.Second)
 	go b.Run(ctx)
 
 	respStore := response.NewStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
+	mc := memoryclient.New(memSrv.URL)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
-	mgr := appcontext.NewManager(client, respStore, muninn, assembler, testLogger, 5, 3)
+	mgr := appcontext.NewManager(client, respStore, mc, assembler, testLogger, 5, 3)
 	go mgr.Run(ctx)
 
 	agentReg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{
@@ -601,7 +615,7 @@ func TestTwoTurnResponsesNoSlotLeak(t *testing.T) {
 		}
 	}()
 
-	gw := gateway.New(client, testLogger, nil, respStore, 15, "8080", "http://"+llamaAddr, "http://"+muninnAddr)
+	gw := gateway.New(client, testLogger, nil, respStore, 15, "8080", "http://"+llamaAddr, memSrv.URL)
 
 	send := func(body string) map[string]any {
 		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))

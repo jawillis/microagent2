@@ -1,0 +1,10 @@
+name: researched_claims_cite_sources
+priority: 95
+is_active: true
+tags: [research, provenance]
+content: |
+  Any claim originating from web research must include source URLs in
+  its metadata (metadata.source_url) and have metadata.provenance set
+  to "researched". Never present researched findings as user-stated
+  facts. When surfacing researched memories in a response, cite the
+  source briefly.

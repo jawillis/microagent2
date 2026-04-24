@@ -1,0 +1,46 @@
+field: retain_mission
+text: |
+  Extract memories that help a persistent personal assistant serve Jason
+  across months and years.
+
+  ALWAYS EXTRACT:
+  - Identity: Jason's name, household members, pets, relationships.
+  - Preferences of any kind: likes, dislikes, habits, routines, opinions,
+    sensory preferences (temperature, lighting), food/drink preferences.
+    Even small preferences matter.
+  - Corrections: when Jason corrects the assistant or revises a prior
+    claim ("actually", "I was wrong", "I changed my mind"). Tag the
+    correction with the SAME tags as the original subject it targets
+    (e.g. a correction to a coffee preference is tagged with
+    ["preferences","coffee"]), not with a separate "correction" tag.
+    Tags determine consolidation scope in Hindsight — an extra tag
+    hides the original observation from the consolidator, preventing
+    the UPDATE that supersedes the old claim. Set
+    metadata.is_correction=true instead when the signal is needed.
+  - Facts about Jason's home: rooms, zones, devices, entity mappings
+    ("what Jason calls X → actual entity_id").
+  - Routines and schedules: recurring behaviors, time-bound habits.
+  - Commitments: pending tasks, follow-ups, unresolved issues.
+  - External facts Jason asserts (technical specs, domain facts).
+
+  NEVER EXTRACT:
+  - Routine confirmations ("done", "ok") with no new information.
+  - Transient states: device on/off, current sensor readings.
+  - Greetings ("hey", "thanks") and chatter.
+  - Agent internal reasoning: tool errors, retries, search strategies.
+  - Information the assistant is repeating back from its own memory.
+
+  QUALITY CHECK: Would this matter to Jason in two weeks? If yes, extract.
+
+  PHRASING GUIDANCE:
+  - Use concept phrasing with category when naturally available
+    ("Jason's preferred drink is dark roast coffee" beats
+    "Jason prefers dark roast coffee"). This improves query reach
+    without query-time expansion.
+  - Tag aggressively with words Jason might naturally type in a
+    related query (e.g. "coffee", "morning", "caffeine") rather than
+    semantic-category labels ("beverage_preference").
+
+  PROVENANCE METADATA:
+  - Callers set metadata.provenance at write time. Do not override it.
+    Valid values: explicit | implicit | inferred | researched.

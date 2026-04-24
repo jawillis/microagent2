@@ -24,7 +24,7 @@ services:
       - VALKEY_ADDR=valkey:6379
       - GATEWAY_PORT=8080
       - LLAMA_ADDR=http://${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
-      - MUNINNDB_ADDR=http://${MUNINNDB_ADDR:-host.docker.internal:8100}
+      - MEMORY_SERVICE_ADDR=http://memory-service:8083
       - SESSION_HASH_TTL_HOURS=${SESSION_HASH_TTL_HOURS:-24}
     depends_on:
       valkey:
@@ -38,12 +38,71 @@ services:
       dockerfile: deploy/Dockerfile.context-manager
     environment:
       - VALKEY_ADDR=valkey:6379
-      - MUNINNDB_ADDR=${MUNINNDB_ADDR:-host.docker.internal:8100}
-      - MUNINNDB_API_KEY=${MUNINNDB_API_KEY:-}
+      - MEMORY_SERVICE_ADDR=http://memory-service:8083
       - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a helpful assistant.}
     depends_on:
       valkey:
         condition: service_healthy
+      memory-service:
+        condition: service_started
+    networks:
+      - microagent
+
+  hindsight:
+    # The Hindsight image is operator-provided. Set HINDSIGHT_IMAGE in .env
+    # to the container image you want to run (see
+    # https://github.com/vectorize-io/hindsight).
+    #
+    # The quickstart image bundles an embedded Postgres at /home/hindsight/.pg0.
+    # Persisted via a named volume so data survives restarts.
+    image: ${HINDSIGHT_IMAGE}
+    environment:
+      # Point Hindsight's LLM provider at llm-proxy so its calls ride the
+      # hindsight-class slots on our broker. llama.cpp speaks OpenAI-compat
+      # via the proxy.
+      - HINDSIGHT_API_LLM_PROVIDER=openai
+      - HINDSIGHT_API_LLM_API_KEY=${HINDSIGHT_LLM_API_KEY:-sk-local}
+      - HINDSIGHT_API_LLM_BASE_URL=http://llm-proxy:8082/v1
+      - HINDSIGHT_API_LLM_MODEL=${HINDSIGHT_LLM_MODEL:-unsloth}
+      # Skip startup LLM verification — llm-proxy needs hindsight-class slots
+      # free for verification to succeed, which races with our startup order.
+      - HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
+    # Named volumes mount root-owned under podman; Hindsight runs as uid 1000
+    # and its embedded Postgres needs write access. Run as 1000:1000 and let
+    # the container initialize /home/hindsight/.pg0 on first boot — with an
+    # empty volume, it inherits the container's working ownership.
+    user: "1000:1000"
+    ports:
+      # Control Plane UI — browse http://localhost:9999 to inspect banks,
+      # memories, observations, and configuration. API is also exposed on
+      # 8888 for direct curl/OpenAPI inspection.
+      - "${HINDSIGHT_CP_PORT:-9999}:9999"
+      - "${HINDSIGHT_API_PORT:-8888}:8888"
+    volumes:
+      - hindsight-data:/home/hindsight/.pg0
+    mem_limit: ${HINDSIGHT_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    depends_on:
+      llm-proxy:
+        condition: service_started
+    networks:
+      - microagent
+
+  memory-service:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.memory-service
+    environment:
+      - HINDSIGHT_ADDR=http://hindsight:8888
+      - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY:-}
+      - HINDSIGHT_WEBHOOK_SECRET=${HINDSIGHT_WEBHOOK_SECRET:?HINDSIGHT_WEBHOOK_SECRET must be set}
+      - MEMORY_BANK_ID=${MEMORY_BANK_ID:-microagent2}
+      - MEMORY_SERVICE_HTTP_ADDR=:8083
+      - MEMORY_SERVICE_EXTERNAL_URL=http://memory-service:8083
+      - MEMORY_YAML_DIR=/etc/microagent2/memory
+    depends_on:
+      hindsight:
+        condition: service_started
     networks:
       - microagent
 
@@ -113,8 +172,7 @@ services:
       dockerfile: deploy/Dockerfile.retro-agent
     environment:
       - VALKEY_ADDR=valkey:6379
-      - MUNINNDB_ADDR=${MUNINNDB_ADDR:-host.docker.internal:8100}
-      - MUNINNDB_API_KEY=${MUNINNDB_API_KEY:-}
+      - MEMORY_SERVICE_ADDR=http://memory-service:8083
       - AGENT_ID=retro-agent
       - AGENT_PRIORITY=1
       - AGENT_PREEMPTIBLE=true
@@ -124,6 +182,8 @@ services:
       valkey:
         condition: service_healthy
       llm-broker:
+        condition: service_started
+      memory-service:
         condition: service_started
     networks:
       - microagent
@@ -163,3 +223,4 @@ networks:
 volumes:
   valkey-data:
   open-webui-data:
+  hindsight-data:

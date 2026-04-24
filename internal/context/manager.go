@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"microagent2/internal/memoryclient"
 	"microagent2/internal/messaging"
 	"microagent2/internal/response"
 )
@@ -13,18 +14,18 @@ import (
 type Manager struct {
 	client       *messaging.Client
 	responses    *response.Store
-	muninn       *MuninnClient
+	memory       *memoryclient.Client
 	assembler    *Assembler
 	logger       *slog.Logger
 	recallLimit  int
 	prewarmLimit int
 }
 
-func NewManager(client *messaging.Client, responses *response.Store, muninn *MuninnClient, assembler *Assembler, logger *slog.Logger, recallLimit, prewarmLimit int) *Manager {
+func NewManager(client *messaging.Client, responses *response.Store, memory *memoryclient.Client, assembler *Assembler, logger *slog.Logger, recallLimit, prewarmLimit int) *Manager {
 	return &Manager{
 		client:       client,
 		responses:    responses,
-		muninn:       muninn,
+		memory:       memory,
 		assembler:    assembler,
 		logger:       logger,
 		recallLimit:  recallLimit,
@@ -78,12 +79,6 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	memCh := make(chan memoryResult, 1)
 
 	go func() {
-		// Canonical history lives in the response store, keyed by session_id.
-		// If the store has something for this session, it's authoritative.
-		// Otherwise the client is in "client-side state" mode (e.g. Open WebUI,
-		// which sends full history in the input every turn and mints no chain
-		// on our side), and we treat payload.Messages[:-1] as the history for
-		// this turn.
 		canonical, err := m.getSessionHistory(ctx, payload.SessionID)
 		if err == nil && len(canonical) > 0 {
 			histCh <- historyResult{history: canonical, source: "store"}
@@ -98,8 +93,25 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 
 	go func() {
 		start := time.Now()
-		mem, err := m.muninn.Recall(ctx, userMsg.Content, m.recallLimit)
-		memCh <- memoryResult{mem, err, time.Since(start)}
+		ctx := memoryclient.WithCorrelationID(ctx, correlationID)
+		resp, err := m.memory.Recall(ctx, memoryclient.RecallRequest{
+			Query: userMsg.Content,
+			Limit: m.recallLimit,
+		})
+		if err != nil {
+			memCh <- memoryResult{err: err, elapsed: time.Since(start)}
+			return
+		}
+		memories := make([]Memory, 0, len(resp.Memories))
+		for _, m := range resp.Memories {
+			memories = append(memories, Memory{
+				ID:      m.ID,
+				Content: m.Content,
+				Score:   m.Score,
+				Tags:    m.Tags,
+			})
+		}
+		memCh <- memoryResult{memories: memories, elapsed: time.Since(start)}
 	}()
 
 	hr := <-histCh
@@ -116,7 +128,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 		)
 	}
 	if mr.err != nil {
-		m.logger.Warn("context_muninn_recall",
+		m.logger.Warn("context_memory_recall",
 			"correlation_id", correlationID,
 			"elapsed_ms", mr.elapsed.Milliseconds(),
 			"memory_count", 0,
@@ -124,7 +136,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 			"error", mr.err.Error(),
 		)
 	} else {
-		m.logger.Info("context_muninn_recall",
+		m.logger.Info("context_memory_recall",
 			"correlation_id", correlationID,
 			"elapsed_ms", mr.elapsed.Milliseconds(),
 			"memory_count", len(mr.memories),
@@ -161,19 +173,18 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 		"assembled_count", len(assembled),
 	)
 
-	go m.preWarmMemories(ctx, payload.SessionID)
+	go m.preWarmMemories(ctx, payload.SessionID, correlationID)
 }
 
 func (m *Manager) getSessionHistory(ctx context.Context, sessionID string) ([]messaging.ChatMsg, error) {
 	return m.responses.GetSessionMessages(ctx, sessionID)
 }
 
-func (m *Manager) preWarmMemories(ctx context.Context, sessionID string) {
+func (m *Manager) preWarmMemories(ctx context.Context, sessionID, correlationID string) {
 	history, err := m.getSessionHistory(ctx, sessionID)
 	if err != nil || len(history) == 0 {
 		return
 	}
-
 	lastAssistant := ""
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == "assistant" {
@@ -184,9 +195,11 @@ func (m *Manager) preWarmMemories(ctx context.Context, sessionID string) {
 	if lastAssistant == "" {
 		return
 	}
-
-	_, err = m.muninn.Recall(ctx, lastAssistant, m.prewarmLimit)
-	if err != nil {
-		m.logger.Debug("pre-warm memory fetch failed", "error", err)
+	ctx = memoryclient.WithCorrelationID(ctx, correlationID)
+	if _, err := m.memory.Recall(ctx, memoryclient.RecallRequest{
+		Query: lastAssistant,
+		Limit: m.prewarmLimit,
+	}); err != nil {
+		m.logger.Debug("pre-warm memory fetch failed", "error", err, "correlation_id", correlationID)
 	}
 }

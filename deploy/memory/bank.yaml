@@ -1,0 +1,12 @@
+bank_id: microagent2
+name: microagent2
+disposition:
+  skepticism: 3
+  literalism: 3
+  empathy: 3
+config:
+  # Fields merged here are additional to mission text loaded from
+  # deploy/memory/missions/*.yaml. Any Hindsight BankConfigUpdate.updates
+  # field is valid.
+  enable_observations: true
+  retain_extraction_mode: concise

@@ -12,7 +12,7 @@ import (
 
 	"microagent2/internal/agent"
 	"microagent2/internal/config"
-	appcontext "microagent2/internal/context"
+	"microagent2/internal/memoryclient"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
 	"microagent2/internal/response"
@@ -23,8 +23,11 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
-	muninnAddr := envOr("MUNINNDB_ADDR", "localhost:8100")
-	muninnAPIKey := envOr("MUNINNDB_API_KEY", "")
+	memoryServiceAddr := os.Getenv("MEMORY_SERVICE_ADDR")
+	if memoryServiceAddr == "" {
+		logger.Error("missing_required_env", "var", "MEMORY_SERVICE_ADDR")
+		os.Exit(1)
+	}
 	agentID := envOr("AGENT_ID", "retro-agent")
 	priority := envInt("AGENT_PRIORITY", 1)
 	heartbeatMS := envInt("HEARTBEAT_INTERVAL_MS", 3000)
@@ -42,7 +45,6 @@ func main() {
 
 	cfgStore := config.NewStore(client.Redis())
 	retroCfg := config.ResolveRetro(ctx, cfgStore)
-	memCfg := config.ResolveMemory(ctx, cfgStore)
 
 	reg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{
 		AgentID:             agentID,
@@ -63,12 +65,12 @@ func main() {
 
 	rt := agent.NewRuntime(client, agentID, priority, true, logger)
 	responses := response.NewStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey, memCfg.Vault, memCfg.RecallThreshold, memCfg.MaxHops, memCfg.StoreConfidence)
+	mc := memoryclient.New(memoryServiceAddr)
 	checkpoints := retro.NewCheckpointStore(client.Redis())
 
-	memJob := retro.NewMemoryExtractionJob(rt, responses, muninn, logger, checkpoints)
-	skillJob := retro.NewSkillCreationJob(rt, responses, muninn, logger, checkpoints, retroCfg.MinHistoryTurns, retroCfg.SkillDupThreshold)
-	curationJob := retro.NewCurationJob(rt, muninn, logger, retroCfg.CurationCategories)
+	memJob := retro.NewMemoryExtractionJob(rt, responses, mc, logger, checkpoints)
+	skillJob := retro.NewSkillCreationJob(rt, responses, mc, logger, checkpoints, retroCfg.MinHistoryTurns, retroCfg.SkillDupThreshold)
+	curationJob := retro.NewCurationJob(rt, mc, logger, retroCfg.CurationCategories, retroCfg.CurationRecallLimit)
 
 	runJob := func(sessionID string, job retro.Job, cp *retro.Checkpoint) {
 		acquired, err := retro.AcquireLock(ctx, client.Redis(), sessionID, job.Type())

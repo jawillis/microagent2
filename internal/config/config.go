@@ -47,18 +47,20 @@ func DefaultBrokerConfig() BrokerConfig {
 }
 
 type RetroConfig struct {
-	InactivityTimeoutS int      `json:"inactivity_timeout_s"`
-	SkillDupThreshold  float64  `json:"skill_dup_threshold"`
-	MinHistoryTurns    int      `json:"min_history_turns"`
-	CurationCategories []string `json:"curation_categories"`
+	InactivityTimeoutS  int      `json:"inactivity_timeout_s"`
+	SkillDupThreshold   float64  `json:"skill_dup_threshold"`
+	MinHistoryTurns     int      `json:"min_history_turns"`
+	CurationCategories  []string `json:"curation_categories"`
+	CurationRecallLimit int      `json:"curation_recall_limit"`
 }
 
 func DefaultRetroConfig() RetroConfig {
 	return RetroConfig{
-		InactivityTimeoutS: 300,
-		SkillDupThreshold:  0.85,
-		MinHistoryTurns:    4,
-		CurationCategories: []string{"preference", "fact", "context", "skill"},
+		InactivityTimeoutS:  300,
+		SkillDupThreshold:   0.85,
+		MinHistoryTurns:     4,
+		CurationCategories:  []string{"preference", "fact", "context", "skill"},
+		CurationRecallLimit: 15,
 	}
 }
 

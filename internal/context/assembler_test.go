@@ -9,6 +9,18 @@ import (
 
 const testSystemPrompt = "You are a terse assistant. Reply in one short sentence."
 
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestAssemble_SystemPromptByteStable(t *testing.T) {
 	a := NewAssembler(testSystemPrompt)
 	user := messaging.ChatMsg{Role: "user", Content: "hi"}
@@ -84,11 +96,10 @@ func TestAssemble_EmptyRecallPassesUserThrough(t *testing.T) {
 func TestAssemble_OnlyContentRendered(t *testing.T) {
 	a := NewAssembler(testSystemPrompt)
 	memories := []Memory{{
-		Content:  "the only thing that should appear",
-		Concept:  "CONCEPT_SHOULD_NOT_APPEAR",
-		Category: "CATEGORY_SHOULD_NOT_APPEAR",
-		Score:    0.99,
-		Why:      "WHY_SHOULD_NOT_APPEAR",
+		ID:      "m1",
+		Content: "the only thing that should appear",
+		Score:   0.99,
+		Tags:    []string{"SHOULD_NOT_APPEAR_TAG"},
 	}}
 	user := messaging.ChatMsg{Role: "user", Content: "q"}
 
@@ -100,7 +111,7 @@ func TestAssemble_OnlyContentRendered(t *testing.T) {
 	}
 
 	for _, msg := range out {
-		for _, forbidden := range []string{"CONCEPT_SHOULD_NOT_APPEAR", "CATEGORY_SHOULD_NOT_APPEAR", "WHY_SHOULD_NOT_APPEAR", "0.99"} {
+		for _, forbidden := range []string{"SHOULD_NOT_APPEAR_TAG", "0.99"} {
 			if strings.Contains(msg.Content, forbidden) {
 				t.Fatalf("forbidden field %q leaked into assembled message: %q", forbidden, msg.Content)
 			}
@@ -182,8 +193,9 @@ func TestAssemble_DoesNotMutateInputs(t *testing.T) {
 	_ = a.Assemble(memories, nil, user)
 
 	for i, m := range memories {
-		if m != snapshotMem[i] {
-			t.Fatalf("memories mutated at index %d: before=%+v after=%+v", i, snapshotMem[i], m)
+		s := snapshotMem[i]
+		if m.ID != s.ID || m.Content != s.Content || m.Score != s.Score || !sameStrings(m.Tags, s.Tags) {
+			t.Fatalf("memories mutated at index %d: before=%+v after=%+v", i, s, m)
 		}
 	}
 	if user.Role != snapshotUser.Role || user.Content != snapshotUser.Content || user.ToolCallID != snapshotUser.ToolCallID || len(user.ToolCalls) != len(snapshotUser.ToolCalls) {

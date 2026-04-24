@@ -10,6 +10,7 @@ import (
 
 	"microagent2/internal/config"
 	appcontext "microagent2/internal/context"
+	"microagent2/internal/memoryclient"
 	"microagent2/internal/messaging"
 	"microagent2/internal/response"
 )
@@ -18,8 +19,11 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
-	muninnAddr := envOr("MUNINNDB_ADDR", "localhost:8100")
-	muninnAPIKey := envOr("MUNINNDB_API_KEY", "")
+	memoryServiceAddr := os.Getenv("MEMORY_SERVICE_ADDR")
+	if memoryServiceAddr == "" {
+		logger.Error("missing_required_env", "var", "MEMORY_SERVICE_ADDR")
+		os.Exit(1)
+	}
 
 	client := messaging.NewClient(valkeyAddr)
 	defer client.Close()
@@ -37,9 +41,9 @@ func main() {
 	memCfg := config.ResolveMemory(ctx, cfgStore)
 
 	responses := response.NewStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey, memCfg.Vault, memCfg.RecallThreshold, memCfg.MaxHops, memCfg.StoreConfidence)
+	mc := memoryclient.New(memoryServiceAddr)
 	assembler := appcontext.NewAssembler(chatCfg.SystemPrompt)
-	mgr := appcontext.NewManager(client, responses, muninn, assembler, logger, memCfg.RecallLimit, memCfg.PrewarmLimit)
+	mgr := appcontext.NewManager(client, responses, mc, assembler, logger, memCfg.RecallLimit, memCfg.PrewarmLimit)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -49,7 +53,7 @@ func main() {
 		cancel()
 	}()
 
-	logger.Info("context manager ready")
+	logger.Info("context manager ready", "memory_service_addr", memoryServiceAddr)
 	if err := mgr.Run(ctx); err != nil && err != gocontext.Canceled {
 		logger.Error("context manager error", "error", err)
 		os.Exit(1)

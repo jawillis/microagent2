@@ -159,6 +159,9 @@ func ResolveRetro(ctx context.Context, store *Store) RetroConfig {
 	if v := os.Getenv("CURATION_CATEGORIES"); v != "" {
 		cfg.CurationCategories = strings.Split(v, ",")
 	}
+	if v, err := strconv.Atoi(os.Getenv("RETRO_CURATION_RECALL_LIMIT")); err == nil && v > 0 {
+		cfg.CurationRecallLimit = v
+	}
 
 	_ = store.Load(ctx, KeyRetro, &cfg)
 	return cfg

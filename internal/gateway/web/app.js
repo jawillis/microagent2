@@ -269,7 +269,7 @@
       if (data.system) {
         addDL(dl, "Gateway Port", data.system.gateway_port);
         addDL(dl, "llama.cpp Address", data.system.llama_addr);
-        addDL(dl, "MuninnDB Address", data.system.muninn_addr);
+        addDL(dl, "Memory Service Address", data.system.memory_addr);
       }
 
       // Agents table (on agents panel)

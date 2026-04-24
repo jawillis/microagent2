@@ -22,7 +22,7 @@ func main() {
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
 	port := envOr("GATEWAY_PORT", "8080")
 	llamaAddr := envOr("LLAMA_ADDR", "http://localhost:8081")
-	muninnAddr := envOr("MUNINNDB_ADDR", "http://localhost:8100")
+	memoryAddr := envOr("MEMORY_SERVICE_ADDR", "http://memory-service:8083")
 
 	client := messaging.NewClient(valkeyAddr)
 	defer client.Close()
@@ -41,7 +41,7 @@ func main() {
 
 	sessionHashTTL := time.Duration(envInt("SESSION_HASH_TTL_HOURS", 24)) * time.Hour
 	responses := response.NewStoreWithSessionHashTTL(client.Redis(), sessionHashTTL)
-	srv := gateway.New(client, logger, cfgStore, responses, chatCfg.RequestTimeoutS, port, llamaAddr, muninnAddr)
+	srv := gateway.New(client, logger, cfgStore, responses, chatCfg.RequestTimeoutS, port, llamaAddr, memoryAddr)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

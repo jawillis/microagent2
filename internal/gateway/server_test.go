@@ -432,7 +432,7 @@ func TestStatus_PartialFailure(t *testing.T) {
 	defer badHTTP.Close()
 
 	srv.llamaAddr = badHTTP.URL
-	srv.muninnAddr = badHTTP.URL
+	srv.memoryAddr = badHTTP.URL
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
 	w := httptest.NewRecorder()
