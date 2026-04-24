@@ -1,0 +1,72 @@
+## ADDED Requirements
+
+### Requirement: Dashboard served from gateway
+The gateway SHALL serve a static HTML/CSS/JS dashboard at `GET /`. The dashboard files SHALL be embedded in the gateway binary using Go's `embed.FS`.
+
+#### Scenario: Dashboard loads
+- **WHEN** a GET request is made to `/`
+- **THEN** the gateway SHALL serve the dashboard HTML page with associated CSS and JS assets
+
+### Requirement: Dashboard has five panels
+The dashboard SHALL provide five navigable panels: Chat, Memory, Agents, Sessions, and System. Navigation between panels SHALL not require full page reloads.
+
+#### Scenario: Panel navigation
+- **WHEN** the user clicks a panel tab
+- **THEN** the dashboard SHALL display the selected panel's content without a page reload
+
+### Requirement: Chat panel
+The Chat panel SHALL display editable fields for: system prompt (textarea), model name (text input), and request timeout in seconds (number input). A save button SHALL PUT the values to `PUT /v1/config` with section `chat`.
+
+#### Scenario: Edit and save chat config
+- **WHEN** the user modifies the system prompt and clicks save
+- **THEN** the dashboard SHALL send a PUT request to `/v1/config` with the chat section values
+
+### Requirement: Memory panel
+The Memory panel SHALL display editable fields for: recall limit, recall threshold, max hops, pre-warm limit, vault name, and store confidence. A save button SHALL PUT the values to `PUT /v1/config` with section `memory`.
+
+#### Scenario: Edit and save memory config
+- **WHEN** the user modifies recall settings and clicks save
+- **THEN** the dashboard SHALL send a PUT request to `/v1/config` with the memory section values
+
+### Requirement: Agents panel
+The Agents panel SHALL display three sub-sections:
+
+1. **Slot Management**: Editable fields for slot count and preempt timeout, with save button
+2. **Agent Registry**: Read-only table showing registered agents with agent ID, priority, preemptible flag, heartbeat interval, and alive status. This data SHALL be fetched from `GET /v1/status`
+3. **Retrospection Policy**: Editable fields for inactivity timeout, skill duplicate threshold, minimum history turns, and curation categories, with save button
+
+#### Scenario: View registered agents
+- **WHEN** the Agents panel is displayed
+- **THEN** the agent registry table SHALL show current agent status from the status endpoint
+
+#### Scenario: Save broker settings
+- **WHEN** the user modifies slot count and clicks save
+- **THEN** the dashboard SHALL send a PUT request to `/v1/config` with the broker section values
+
+### Requirement: Sessions panel
+The Sessions panel SHALL display a table of active sessions with session ID, turn count, and last active time. Each session row SHALL have View and Delete action buttons. View SHALL display the session's chat history. Delete SHALL call `DELETE /v1/sessions/:id` and remove the row.
+
+The Sessions panel SHALL also display retro action buttons per session: Run Memory Extraction, Run Skill Creation, and Run Curation. These SHALL POST to `/v1/retro/:session/trigger`.
+
+#### Scenario: View session history
+- **WHEN** the user clicks View on a session row
+- **THEN** the dashboard SHALL fetch and display the chat history for that session
+
+#### Scenario: Delete session
+- **WHEN** the user clicks Delete on a session row
+- **THEN** the dashboard SHALL send a DELETE request and remove the row from the table
+
+#### Scenario: Trigger retro job
+- **WHEN** the user clicks a retro action button for a session
+- **THEN** the dashboard SHALL POST to the retro trigger endpoint and display the result
+
+### Requirement: System panel
+The System panel SHALL display health check results for Valkey, llama.cpp, and MuninnDB (connected/disconnected status). It SHALL also display read-only infrastructure settings (gateway port, Valkey address, LLM server address, MuninnDB address) as reported by the status endpoint.
+
+#### Scenario: All services healthy
+- **WHEN** all external services are reachable
+- **THEN** the System panel SHALL show green connected indicators for each service
+
+#### Scenario: Service unreachable
+- **WHEN** a service (e.g., MuninnDB) is unreachable
+- **THEN** the System panel SHALL show a red disconnected indicator for that service
