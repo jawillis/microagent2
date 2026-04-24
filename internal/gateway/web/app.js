@@ -1,20 +1,7 @@
 (function () {
   "use strict";
 
-  // --- Panel switching ---
-  document.querySelectorAll(".tab").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      document.querySelectorAll(".tab").forEach(function (b) { b.classList.remove("active"); });
-      document.querySelectorAll(".panel").forEach(function (p) { p.classList.remove("active"); });
-      btn.classList.add("active");
-      document.getElementById("panel-" + btn.dataset.panel).classList.add("active");
-      if (btn.dataset.panel === "sessions") loadSessions();
-      if (btn.dataset.panel === "system") loadStatus();
-      if (btn.dataset.panel === "agents") { loadStatus(); loadConfig(); loadMCPServers(); }
-    });
-  });
-
-  // --- API helpers ---
+  // ---- API helpers ----------------------------------------------------
   function api(method, path, body) {
     var opts = { method: method, headers: {} };
     if (body !== undefined) {
@@ -22,437 +9,322 @@
       opts.body = JSON.stringify(body);
     }
     return fetch(path, opts).then(function (r) {
-      if (!r.ok) return r.json().then(function (e) { throw new Error(e.error ? e.error.message : r.statusText); });
-      return r.json();
-    });
-  }
-
-  function showStatus(id, ok, msg) {
-    var el = document.getElementById(id);
-    el.textContent = msg;
-    el.className = "save-status " + (ok ? "ok" : "err");
-    setTimeout(function () { el.textContent = ""; }, 3000);
-  }
-
-  // --- Config load/save ---
-  function loadConfig() {
-    api("GET", "/v1/config").then(function (cfg) {
-      // Chat
-      setVal("chat-system_prompt", cfg.chat.system_prompt);
-      setVal("chat-model", cfg.chat.model);
-      setVal("chat-request_timeout_s", cfg.chat.request_timeout_s);
-      // Memory
-      setVal("memory-recall_limit", cfg.memory.recall_limit);
-      setVal("memory-recall_threshold", cfg.memory.recall_threshold);
-      setVal("memory-max_hops", cfg.memory.max_hops);
-      setVal("memory-prewarm_limit", cfg.memory.prewarm_limit);
-      setVal("memory-vault", cfg.memory.vault);
-      setVal("memory-store_confidence", cfg.memory.store_confidence);
-      // Broker
-      setVal("broker-slot_count", cfg.broker.slot_count);
-      setVal("broker-preempt_timeout_ms", cfg.broker.preempt_timeout_ms);
-      // Retro
-      setVal("retro-inactivity_timeout_s", cfg.retro.inactivity_timeout_s);
-      setVal("retro-skill_dup_threshold", cfg.retro.skill_dup_threshold);
-      setVal("retro-min_history_turns", cfg.retro.min_history_turns);
-      setVal("retro-curation_categories", (cfg.retro.curation_categories || []).join(", "));
-    });
-  }
-
-  function setVal(id, val) {
-    var el = document.getElementById(id);
-    if (el) el.value = val != null ? val : "";
-  }
-  function getVal(id) { return document.getElementById(id).value; }
-  function getNum(id) { return Number(document.getElementById(id).value); }
-
-  function saveSection(section, values, statusId) {
-    api("PUT", "/v1/config", { section: section, values: values })
-      .then(function () { showStatus(statusId, true, "Saved"); })
-      .catch(function (e) { showStatus(statusId, false, e.message); });
-  }
-
-  document.getElementById("chat-form").addEventListener("submit", function (e) {
-    e.preventDefault();
-    saveSection("chat", {
-      system_prompt: getVal("chat-system_prompt"),
-      model: getVal("chat-model"),
-      request_timeout_s: getNum("chat-request_timeout_s")
-    }, "chat-status");
-  });
-
-  document.getElementById("memory-form").addEventListener("submit", function (e) {
-    e.preventDefault();
-    saveSection("memory", {
-      recall_limit: getNum("memory-recall_limit"),
-      recall_threshold: getNum("memory-recall_threshold"),
-      max_hops: getNum("memory-max_hops"),
-      prewarm_limit: getNum("memory-prewarm_limit"),
-      vault: getVal("memory-vault"),
-      store_confidence: getNum("memory-store_confidence")
-    }, "memory-status");
-  });
-
-  document.getElementById("broker-form").addEventListener("submit", function (e) {
-    e.preventDefault();
-    saveSection("broker", {
-      slot_count: getNum("broker-slot_count"),
-      preempt_timeout_ms: getNum("broker-preempt_timeout_ms")
-    }, "broker-status");
-  });
-
-  document.getElementById("retro-form").addEventListener("submit", function (e) {
-    e.preventDefault();
-    var cats = getVal("retro-curation_categories").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-    saveSection("retro", {
-      inactivity_timeout_s: getNum("retro-inactivity_timeout_s"),
-      skill_dup_threshold: getNum("retro-skill_dup_threshold"),
-      min_history_turns: getNum("retro-min_history_turns"),
-      curation_categories: cats
-    }, "retro-status");
-  });
-
-  // --- Sessions ---
-  function loadSessions() {
-    api("GET", "/v1/sessions").then(function (sessions) {
-      var tbody = document.querySelector("#sessions-table tbody");
-      tbody.innerHTML = "";
-      sessions.forEach(function (s) {
-        var tr = document.createElement("tr");
-        tr.innerHTML =
-          "<td>" + esc(s.session_id) + "</td>" +
-          "<td>" + s.turn_count + "</td>" +
-          "<td></td>";
-        var actions = tr.querySelector("td:last-child");
-
-        var viewBtn = document.createElement("button");
-        viewBtn.className = "action-btn";
-        viewBtn.textContent = "View";
-        viewBtn.addEventListener("click", function () { viewSession(s.session_id); });
-        actions.appendChild(viewBtn);
-
-        var delBtn = document.createElement("button");
-        delBtn.className = "action-btn danger";
-        delBtn.textContent = "Delete";
-        delBtn.addEventListener("click", function () { deleteSession(s.session_id); });
-        actions.appendChild(delBtn);
-
-        var sel = document.createElement("select");
-        sel.className = "retro-select";
-        ["memory_extraction", "skill_creation", "curation"].forEach(function (jt) {
-          var opt = document.createElement("option");
-          opt.value = jt;
-          opt.textContent = jt;
-          sel.appendChild(opt);
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          var msg = t;
+          try { var j = JSON.parse(t); msg = j.error && j.error.message ? j.error.message : (j.detail || t); } catch (_) {}
+          throw new Error(msg || r.statusText);
         });
-        actions.appendChild(sel);
-
-        var trigBtn = document.createElement("button");
-        trigBtn.className = "action-btn";
-        trigBtn.textContent = "Trigger";
-        trigBtn.addEventListener("click", function () { triggerRetro(s.session_id, sel.value); });
-        actions.appendChild(trigBtn);
-
-        tbody.appendChild(tr);
-      });
-    });
-  }
-
-  function viewSession(id) {
-    api("GET", "/v1/sessions/" + encodeURIComponent(id)).then(function (data) {
-      var container = document.getElementById("session-messages");
-      container.innerHTML = "";
-      (data.messages || []).forEach(function (m) {
-        container.appendChild(renderMessage(m));
-      });
-      document.getElementById("session-detail").classList.remove("hidden");
-    });
-  }
-
-  function renderMessage(m) {
-    // Assistant message with tool_calls: render each as a collapsed status block.
-    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-      var wrap = document.createElement("div");
-      wrap.className = "msg";
-      m.tool_calls.forEach(function (tc) {
-        wrap.appendChild(renderToolCallBlock(tc));
-      });
-      if (m.content) {
-        var textDiv = document.createElement("div");
-        textDiv.className = "msg-content";
-        textDiv.textContent = m.content;
-        wrap.appendChild(textDiv);
       }
-      return wrap;
-    }
-    // Tool result message: collapsed block with the output.
-    if (m.role === "tool") {
-      return renderToolResultBlock(m);
-    }
-    var div = document.createElement("div");
-    div.className = "msg";
-    div.innerHTML = '<div class="msg-role ' + esc(m.role) + '">' + esc(m.role) + '</div>' +
-                    '<div class="msg-content">' + esc(m.content) + '</div>';
-    return div;
-  }
-
-  function renderToolCallBlock(tc) {
-    var det = document.createElement("details");
-    det.className = "tool-call";
-    var sum = document.createElement("summary");
-    sum.textContent = "🔧 " + (tc.function && tc.function.name ? tc.function.name : "tool_call");
-    det.appendChild(sum);
-    var body = document.createElement("pre");
-    body.className = "tool-call-body";
-    body.textContent = prettyJSON(tc.function && tc.function.arguments);
-    det.appendChild(body);
-    return det;
-  }
-
-  function renderToolResultBlock(m) {
-    var det = document.createElement("details");
-    det.className = "tool-call tool-result";
-    var sum = document.createElement("summary");
-    sum.textContent = "↳ tool result" + (m.tool_call_id ? " (" + m.tool_call_id + ")" : "");
-    det.appendChild(sum);
-    var body = document.createElement("pre");
-    body.className = "tool-call-body";
-    body.textContent = m.content || "";
-    det.appendChild(body);
-    return det;
-  }
-
-  function prettyJSON(s) {
-    if (s == null || s === "") return "";
-    try {
-      return JSON.stringify(JSON.parse(s), null, 2);
-    } catch (_e) {
-      return String(s);
-    }
-  }
-
-  document.getElementById("close-detail").addEventListener("click", function () {
-    document.getElementById("session-detail").classList.add("hidden");
-  });
-
-  function deleteSession(id) {
-    if (!confirm("Delete session " + id + "?")) return;
-    api("DELETE", "/v1/sessions/" + encodeURIComponent(id))
-      .then(function () { loadSessions(); })
-      .catch(function (e) { alert(e.message); });
-  }
-
-  function triggerRetro(sessionId, jobType) {
-    api("POST", "/v1/retro/" + encodeURIComponent(sessionId) + "/trigger", { job_type: jobType })
-      .then(function () { alert("Retro job triggered: " + jobType); })
-      .catch(function (e) { alert(e.message); });
-  }
-
-  // --- System Status ---
-  function loadStatus() {
-    api("GET", "/v1/status").then(function (data) {
-      // Health indicators
-      var container = document.getElementById("health-indicators");
-      container.innerHTML = "";
-      (data.services || []).forEach(function (svc) {
-        var card = document.createElement("div");
-        card.className = "health-card";
-        card.innerHTML = '<span class="health-dot ' + svc.status + '"></span>' +
-                         '<span>' + esc(svc.name) + '</span>' +
-                         (svc.message ? '<span class="health-msg">' + esc(svc.message) + '</span>' : '');
-        container.appendChild(card);
-      });
-
-      // System info
-      var dl = document.getElementById("system-info");
-      dl.innerHTML = "";
-      if (data.system) {
-        addDL(dl, "Gateway Port", data.system.gateway_port);
-        addDL(dl, "llama.cpp Address", data.system.llama_addr);
-        addDL(dl, "Memory Service Address", data.system.memory_addr);
-      }
-
-      // Agents table (on agents panel)
-      var tbody = document.querySelector("#agents-table tbody");
-      tbody.innerHTML = "";
-      (data.agents || []).forEach(function (a) {
-        var tr = document.createElement("tr");
-        tr.innerHTML =
-          "<td>" + esc(a.agent_id) + "</td>" +
-          "<td>" + a.priority + "</td>" +
-          "<td>" + (a.preemptible ? "Yes" : "No") + "</td>" +
-          "<td>" + esc((a.capabilities || []).join(", ")) + "</td>" +
-          "<td>" + esc(a.trigger) + "</td>";
-        tbody.appendChild(tr);
-      });
+      var ct = r.headers.get("content-type") || "";
+      return ct.indexOf("application/json") === 0 ? r.json() : r.text();
     });
-  }
-
-  function addDL(dl, term, def) {
-    var dt = document.createElement("dt");
-    dt.textContent = term;
-    dl.appendChild(dt);
-    var dd = document.createElement("dd");
-    dd.textContent = def || "—";
-    dl.appendChild(dd);
   }
 
   function esc(s) {
-    if (s == null) return "";
     var d = document.createElement("div");
-    d.textContent = String(s);
+    d.textContent = s == null ? "" : String(s);
     return d.innerHTML;
   }
 
-  // --- MCP Servers ---
-  var mcpEditingName = null;
-
-  function loadMCPServers() {
-    Promise.all([
-      api("GET", "/v1/mcp/servers"),
-      api("GET", "/v1/status")
-    ]).then(function (results) {
-      var stored = (results[0] && results[0].servers) || [];
-      var live = (results[1] && results[1].mcp_servers) || [];
-      var liveByName = {};
-      live.forEach(function (e) { liveByName[e.name] = e; });
-      var tbody = document.querySelector("#mcp-table tbody");
-      tbody.innerHTML = "";
-      stored.forEach(function (s) {
-        var l = liveByName[s.name] || {};
-        var tr = document.createElement("tr");
-        tr.innerHTML =
-          "<td>" + esc(s.name) + "</td>" +
-          "<td>" + (s.enabled ? "Yes" : "No") + "</td>" +
-          "<td><code>" + esc(s.command) + (s.args && s.args.length ? " " + esc(s.args.join(" ")) : "") + "</code></td>" +
-          "<td>" + (l.connected ? "✓" : "—") + "</td>" +
-          "<td>" + (l.tool_count || 0) + "</td>" +
-          "<td>" + esc(l.last_error || "") + "</td>" +
-          "<td></td>";
-        var actions = tr.querySelector("td:last-child");
-        var edit = document.createElement("button");
-        edit.className = "action-btn";
-        edit.textContent = "Edit";
-        edit.addEventListener("click", function () { mcpOpenForm(s); });
-        actions.appendChild(edit);
-        var del = document.createElement("button");
-        del.className = "action-btn danger";
-        del.textContent = "Delete";
-        del.addEventListener("click", function () { mcpDelete(s.name); });
-        actions.appendChild(del);
-        tbody.appendChild(tr);
-      });
-
-      // Drift detection: show banner when stored config diverges from live state.
-      var banner = document.getElementById("mcp-restart-banner");
-      var drift = computeMCPDrift(stored, liveByName);
-      if (drift) banner.classList.remove("hidden");
-      else banner.classList.add("hidden");
-    }).catch(function (e) {
-      console.error("loadMCPServers", e);
-    });
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
   }
 
-  function computeMCPDrift(stored, liveByName) {
-    // Banner shows when stored names/commands/args/env/enabled differ from
-    // what main-agent has actually loaded (reported via mcp_servers health).
-    // Simple heuristic: any stored entry without a matching live entry, or
-    // any live entry missing from stored, or any enabled-disagreement.
-    var storedNames = stored.map(function (s) { return s.name; });
-    var liveNames = Object.keys(liveByName);
-    if (storedNames.length !== liveNames.length) return true;
-    for (var i = 0; i < stored.length; i++) {
-      var s = stored[i];
-      var l = liveByName[s.name];
-      if (!l) return true;
-      if (!!s.enabled !== !!l.enabled) return true;
-    }
-    return false;
-  }
+  // ---- Panel composition ----------------------------------------------
+  // On load, fetch /v1/dashboard/panels and build tabs + panel containers
+  // from the response. Each panel is a list of sections rendered by kind.
 
-  function mcpOpenForm(existing) {
-    var form = document.getElementById("mcp-form");
-    form.classList.remove("hidden");
-    document.getElementById("mcp-name").value = existing ? existing.name : "";
-    document.getElementById("mcp-name").disabled = !!existing;
-    document.getElementById("mcp-command").value = existing ? existing.command : "";
-    document.getElementById("mcp-args").value = existing && existing.args ? existing.args.join(" ") : "";
-    document.getElementById("mcp-enabled").checked = existing ? !!existing.enabled : true;
-    document.getElementById("mcp-env").value = existing && existing.env
-      ? Object.keys(existing.env).map(function (k) { return k + "=" + existing.env[k]; }).join("\n")
-      : "";
-    mcpEditingName = existing ? existing.name : null;
-  }
+  function loadPanels() {
+    return api("GET", "/v1/dashboard/panels").then(function (data) {
+      var panels = (data && data.panels) || [];
+      var tabs = document.getElementById("panel-tabs");
+      var host = document.getElementById("panel-host");
+      var empty = document.getElementById("empty-state");
+      tabs.innerHTML = "";
+      host.innerHTML = "";
 
-  document.getElementById("mcp-add-btn").addEventListener("click", function () { mcpOpenForm(null); });
-  document.getElementById("mcp-cancel").addEventListener("click", function () {
-    document.getElementById("mcp-form").classList.add("hidden");
-    mcpEditingName = null;
-  });
+      if (panels.length === 0) {
+        empty.classList.remove("hidden");
+        return;
+      }
+      empty.classList.add("hidden");
 
-  document.getElementById("mcp-form").addEventListener("submit", function (e) {
-    e.preventDefault();
-    var entry = {
-      name: getVal("mcp-name"),
-      command: getVal("mcp-command"),
-      args: getVal("mcp-args").split(/\s+/).filter(Boolean),
-      enabled: document.getElementById("mcp-enabled").checked,
-      env: parseEnvText(getVal("mcp-env"))
-    };
-    var done = function () {
-      document.getElementById("mcp-form").classList.add("hidden");
-      mcpEditingName = null;
-      loadMCPServers();
-      showStatus("mcp-status", true, "Saved — restart main-agent to apply");
-    };
-    var fail = function (err) { showStatus("mcp-status", false, err.message); };
-    if (mcpEditingName) {
-      // PUT the full list with this entry replaced.
-      api("GET", "/v1/mcp/servers").then(function (cur) {
-        var list = (cur.servers || []).map(function (s) {
-          return s.name === mcpEditingName ? entry : s;
+      panels.forEach(function (entry, idx) {
+        var d = entry.descriptor || entry;
+        var panelID = "panel-" + slug(entry.service_id + "-" + d.title);
+
+        var tab = el("button", "tab" + (idx === 0 ? " active" : ""));
+        tab.textContent = d.title;
+        tab.dataset.panel = panelID;
+        tab.addEventListener("click", function () {
+          document.querySelectorAll("#panel-tabs .tab").forEach(function (b) { b.classList.remove("active"); });
+          document.querySelectorAll("#panel-host .panel").forEach(function (p) { p.classList.remove("active"); });
+          tab.classList.add("active");
+          document.getElementById(panelID).classList.add("active");
         });
-        return api("PUT", "/v1/mcp/servers", { servers: list });
-      }).then(done).catch(fail);
-    } else {
-      api("POST", "/v1/mcp/servers", entry).then(done).catch(fail);
-    }
-  });
+        tabs.appendChild(tab);
 
-  function mcpDelete(name) {
-    if (!confirm("Delete MCP server " + name + "?")) return;
-    api("DELETE", "/v1/mcp/servers/" + encodeURIComponent(name))
-      .then(function () { loadMCPServers(); })
-      .catch(function (e) { alert(e.message); });
+        var panel = el("section", "panel" + (idx === 0 ? " active" : ""));
+        panel.id = panelID;
+        renderPanel(panel, d);
+        host.appendChild(panel);
+      });
+    }).catch(function (err) {
+      var host = document.getElementById("panel-host");
+      host.innerHTML = '<div class="err">Failed to load dashboard panels: ' + esc(err.message) + '</div>';
+    });
   }
 
-  function parseEnvText(s) {
-    var out = {};
-    s.split(/\n/).forEach(function (line) {
-      line = line.trim();
-      if (!line) return;
-      var idx = line.indexOf("=");
-      if (idx < 0) return;
-      out[line.slice(0, idx).trim()] = line.slice(idx + 1);
-    });
-    return out;
+  function slug(s) {
+    return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
   }
 
-  // Patched api() to tolerate 204 No Content
-  var _api = api;
-  api = function (method, path, body) {
-    var opts = { method: method, headers: {} };
-    if (body !== undefined) {
-      opts.headers["Content-Type"] = "application/json";
-      opts.body = JSON.stringify(body);
-    }
-    return fetch(path, opts).then(function (r) {
-      if (!r.ok) return r.json().then(function (e) { throw new Error(e.error ? e.error.message : r.statusText); });
-      if (r.status === 204) return null;
-      return r.json();
+  function renderPanel(container, descriptor) {
+    var header = el("h2", null, descriptor.title);
+    container.appendChild(header);
+    (descriptor.sections || []).forEach(function (section) {
+      var node = renderSection(section);
+      if (node) container.appendChild(node);
     });
-  };
+  }
 
-  // Initial load
-  loadConfig();
+  // ---- Section renderers ----------------------------------------------
+  function renderSection(section) {
+    switch (section.kind) {
+      case "form":   return renderFormSection(section);
+      case "iframe": return renderIframeSection(section);
+      case "status": return renderStatusSection(section);
+      default:
+        var d = el("div", "err", "Unknown section kind: " + section.kind);
+        return d;
+    }
+  }
+
+  function renderFormSection(section) {
+    var wrap = el("div", "section section-form");
+    wrap.appendChild(el("h3", null, section.title));
+
+    var form = el("form");
+    var grid = el("div", "form-grid");
+    var fields = section.fields || {};
+    var fieldNames = Object.keys(fields);
+
+    // Load current values from /v1/config, populate inputs, wire submit.
+    api("GET", "/v1/config").then(function (cfg) {
+      var values = (cfg && cfg[section.config_key]) || {};
+      fieldNames.forEach(function (name) {
+        var schema = fields[name];
+        var group = renderField(name, schema, values[name]);
+        grid.appendChild(group);
+      });
+    }).catch(function (err) {
+      grid.appendChild(el("div", "err", "Load failed: " + esc(err.message)));
+    });
+
+    form.appendChild(grid);
+
+    var saveBtn = el("button", "save-btn", "Save");
+    saveBtn.type = "submit";
+    var status = el("span", "save-status");
+    form.appendChild(saveBtn);
+    form.appendChild(status);
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var out = {};
+      fieldNames.forEach(function (name) {
+        var schema = fields[name];
+        if (schema.readonly) return; // skip readonly fields
+        var input = form.querySelector('[data-field="' + name + '"]');
+        if (!input) return;
+        out[name] = readField(schema, input);
+      });
+      api("PUT", "/v1/config", { section: section.config_key, values: out })
+        .then(function () {
+          status.textContent = "Saved";
+          status.className = "save-status ok";
+          setTimeout(function () { status.textContent = ""; }, 3000);
+        })
+        .catch(function (err) {
+          status.textContent = "Error: " + err.message;
+          status.className = "save-status err";
+        });
+    });
+
+    wrap.appendChild(form);
+    return wrap;
+  }
+
+  function renderField(name, schema, currentValue) {
+    var group = el("label", "form-field");
+    var labelText = schema.label || name;
+    group.appendChild(el("span", "field-label", labelText));
+    if (schema.description) group.appendChild(el("span", "field-desc", schema.description));
+
+    var input;
+    switch (schema.type) {
+      case "textarea":
+        input = el("textarea");
+        input.rows = 8;
+        break;
+      case "boolean":
+        input = el("input");
+        input.type = "checkbox";
+        break;
+      case "enum":
+        input = el("select");
+        (schema.values || []).forEach(function (v) {
+          var opt = el("option", null, v);
+          opt.value = v;
+          input.appendChild(opt);
+        });
+        break;
+      case "number":
+      case "integer":
+        input = el("input");
+        input.type = "number";
+        if (schema.min !== undefined) input.min = schema.min;
+        if (schema.max !== undefined) input.max = schema.max;
+        if (schema.step !== undefined) input.step = schema.step;
+        else if (schema.type === "integer") input.step = "1";
+        break;
+      default:
+        input = el("input");
+        input.type = "text";
+    }
+    input.dataset.field = name;
+    if (schema.readonly) input.readOnly = true;
+
+    var initial = currentValue !== undefined ? currentValue : (schema.default !== undefined ? schema.default : null);
+    if (initial !== null && initial !== undefined) {
+      if (schema.type === "boolean") input.checked = Boolean(initial);
+      else input.value = initial;
+    }
+    group.appendChild(input);
+    return group;
+  }
+
+  function readField(schema, input) {
+    switch (schema.type) {
+      case "boolean": return input.checked;
+      case "number":  return input.value === "" ? null : parseFloat(input.value);
+      case "integer": return input.value === "" ? null : parseInt(input.value, 10);
+      default:        return input.value;
+    }
+  }
+
+  function renderIframeSection(section) {
+    var wrap = el("div", "section section-iframe");
+    wrap.appendChild(el("h3", null, section.title));
+    var frame = el("iframe");
+    frame.src = section.url;
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+    frame.style.width = "100%";
+    frame.style.height = section.height || "600px";
+    frame.style.border = "1px solid #ccc";
+    wrap.appendChild(frame);
+    return wrap;
+  }
+
+  function renderStatusSection(section) {
+    var wrap = el("div", "section section-status");
+    wrap.appendChild(el("h3", null, section.title));
+    var body = el("div", "status-body");
+    body.textContent = "Loading…";
+    wrap.appendChild(body);
+
+    api("GET", section.url).then(function (data) {
+      body.innerHTML = "";
+      if (section.layout === "table") {
+        body.appendChild(renderAsTable(data));
+      } else {
+        body.appendChild(renderAsKeyValue(data));
+      }
+    }).catch(function (err) {
+      body.textContent = "Error: " + err.message;
+      body.className = "status-body err";
+    });
+    return wrap;
+  }
+
+  function renderAsKeyValue(obj) {
+    // Accept either a top-level object or a { services: [...], system: {...}, ... } shape.
+    var dl = el("dl", "kv");
+    flatten(obj, "", function (k, v) {
+      dl.appendChild(el("dt", null, k));
+      dl.appendChild(el("dd", null, typeof v === "object" ? JSON.stringify(v) : String(v)));
+    });
+    return dl;
+  }
+
+  function flatten(obj, prefix, cb) {
+    if (obj == null) return;
+    if (Array.isArray(obj)) {
+      cb(prefix || "items", obj);
+      return;
+    }
+    if (typeof obj !== "object") {
+      cb(prefix, obj);
+      return;
+    }
+    Object.keys(obj).forEach(function (k) {
+      var path = prefix ? prefix + "." + k : k;
+      var v = obj[k];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        flatten(v, path, cb);
+      } else {
+        cb(path, v);
+      }
+    });
+  }
+
+  function renderAsTable(data) {
+    // Accept an array directly, or an object whose first array value is the rows.
+    var rows = Array.isArray(data) ? data : firstArrayValue(data);
+    if (!rows || rows.length === 0) {
+      return el("p", "muted", "No rows.");
+    }
+    var columns = columnsFor(rows);
+    var table = el("table");
+    var thead = el("thead");
+    var trh = el("tr");
+    columns.forEach(function (c) { trh.appendChild(el("th", null, c)); });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    rows.forEach(function (row) {
+      var tr = el("tr");
+      columns.forEach(function (c) {
+        var v = row && row[c];
+        tr.appendChild(el("td", null, v == null ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v))));
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function firstArrayValue(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    var keys = Object.keys(obj);
+    for (var i = 0; i < keys.length; i++) {
+      if (Array.isArray(obj[keys[i]])) return obj[keys[i]];
+    }
+    return null;
+  }
+
+  function columnsFor(rows) {
+    var set = {};
+    rows.forEach(function (r) {
+      if (r && typeof r === "object") Object.keys(r).forEach(function (k) { set[k] = true; });
+    });
+    return Object.keys(set);
+  }
+
+  // ---- Bootstrap -------------------------------------------------------
+  document.addEventListener("DOMContentLoaded", loadPanels);
 })();

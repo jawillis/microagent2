@@ -1,6 +1,10 @@
 package messaging
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"microagent2/internal/dashboard"
+)
 
 type ChatRequestPayload struct {
 	SessionID string    `json:"session_id"`
@@ -94,12 +98,17 @@ type PreemptPayload struct {
 }
 
 type RegisterPayload struct {
-	AgentID            string   `json:"agent_id"`
-	Priority           int      `json:"priority"`
-	Preemptible        bool     `json:"preemptible"`
-	Capabilities       []string `json:"capabilities"`
-	Trigger            string   `json:"trigger"`
-	HeartbeatIntervalMS int     `json:"heartbeat_interval_ms"`
+	AgentID             string                        `json:"agent_id"`
+	Priority            int                           `json:"priority"`
+	Preemptible         bool                          `json:"preemptible"`
+	Capabilities        []string                      `json:"capabilities"`
+	Trigger             string                        `json:"trigger"`
+	HeartbeatIntervalMS int                           `json:"heartbeat_interval_ms"`
+	// DashboardPanel optionally declares the service's dashboard panel.
+	// When present, the gateway aggregates it at GET /v1/dashboard/panels
+	// and the dashboard shell renders it alongside built-in panels.
+	// Omitted for services that don't contribute to the dashboard.
+	DashboardPanel *dashboard.PanelDescriptor `json:"dashboard_panel,omitempty"`
 }
 
 type DeregisterPayload struct {

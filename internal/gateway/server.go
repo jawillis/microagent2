@@ -31,6 +31,11 @@ type Server struct {
 	gatewayPort     string
 	llamaAddr       string
 	memoryAddr      string
+
+	// registry is the gateway's in-memory view of live services, used
+	// to aggregate dashboard panel descriptors at GET /v1/dashboard/panels.
+	// Populated by the RegistryConsumer started via RunBackground.
+	registry *registry.Registry
 }
 
 func New(client *messaging.Client, logger *slog.Logger, configStore *config.Store, responses *response.Store, requestTimeoutS int, gatewayPort, llamaAddr, memoryAddr string) *Server {
@@ -44,6 +49,7 @@ func New(client *messaging.Client, logger *slog.Logger, configStore *config.Stor
 		gatewayPort:     gatewayPort,
 		llamaAddr:       llamaAddr,
 		memoryAddr:      memoryAddr,
+		registry:        registry.NewRegistry(),
 	}
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
@@ -60,6 +66,7 @@ func New(client *messaging.Client, logger *slog.Logger, configStore *config.Stor
 	s.mux.HandleFunc("PUT /v1/mcp/servers", s.handlePutMCPServers)
 	s.mux.HandleFunc("POST /v1/mcp/servers", s.handleAddMCPServer)
 	s.mux.HandleFunc("DELETE /v1/mcp/servers/{name}", s.handleDeleteMCPServer)
+	s.mux.HandleFunc("GET /v1/dashboard/panels", s.handleListDashboardPanels)
 
 	webFS, _ := fs.Sub(webFiles, "web")
 	s.mux.Handle("GET /", http.FileServer(http.FS(webFS)))
@@ -68,6 +75,20 @@ func New(client *messaging.Client, logger *slog.Logger, configStore *config.Stor
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// RunBackground starts goroutines the gateway needs to stay current with
+// service liveness — specifically, a registry consumer + heartbeat
+// monitor so GET /v1/dashboard/panels reflects which services are alive.
+// Safe to call once at startup; goroutines exit when ctx is cancelled.
+func (s *Server) RunBackground(ctx context.Context) {
+	rc := registry.NewRegistryConsumerWithGroup(s.client, s.registry, s.logger, nil, messaging.ConsumerGroupGateway)
+	go func() {
+		if err := rc.RunRegistrationConsumer(ctx); err != nil && err != context.Canceled {
+			s.logger.Error("gateway_registry_consumer_exit", "error", err)
+		}
+	}()
+	go rc.RunHeartbeatMonitor(ctx)
 }
 
 // publishTurnCompleted notifies subscribers on channel:events that a turn

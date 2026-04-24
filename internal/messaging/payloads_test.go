@@ -2,7 +2,10 @@ package messaging
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"microagent2/internal/dashboard"
 )
 
 func TestChatMsgPlainMarshalOmitsToolFields(t *testing.T) {
@@ -152,6 +155,52 @@ func TestLLMRequestPayloadEmitsClassWhenSet(t *testing.T) {
 	want := `{"slot_id":4,"slot_class":"hindsight","messages":[{"role":"user","content":"hi"}],"stream":false}`
 	if got := string(data); got != want {
 		t.Fatalf("want %q got %q", want, got)
+	}
+}
+
+func TestRegisterPayloadOmitsDashboardPanelWhenAbsent(t *testing.T) {
+	p := RegisterPayload{AgentID: "a", Priority: 0, HeartbeatIntervalMS: 3000}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "dashboard_panel") {
+		t.Fatalf("omitempty failed; got %s", data)
+	}
+}
+
+func TestRegisterPayloadRoundTripsDashboardPanel(t *testing.T) {
+	p := RegisterPayload{
+		AgentID:             "memory-service",
+		Priority:            0,
+		Capabilities:        []string{"memory"},
+		HeartbeatIntervalMS: 3000,
+		DashboardPanel: &dashboard.PanelDescriptor{
+			Version: 1,
+			Title:   "Memory",
+			Sections: []dashboard.Section{
+				{Kind: dashboard.KindIframe, Iframe: &dashboard.IframeSection{
+					Title: "CP", URL: "http://x:9999",
+				}},
+			},
+		},
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back RegisterPayload
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.DashboardPanel == nil {
+		t.Fatal("descriptor dropped on roundtrip")
+	}
+	if err := dashboard.ValidateDescriptor(back.DashboardPanel); err != nil {
+		t.Fatalf("roundtripped descriptor fails validation: %v", err)
+	}
+	if back.DashboardPanel.Sections[0].Iframe.URL != "http://x:9999" {
+		t.Fatalf("iframe URL mangled: %+v", back.DashboardPanel)
 	}
 }
 

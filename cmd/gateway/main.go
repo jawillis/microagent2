@@ -42,6 +42,7 @@ func main() {
 	sessionHashTTL := time.Duration(envInt("SESSION_HASH_TTL_HOURS", 24)) * time.Hour
 	responses := response.NewStoreWithSessionHashTTL(client.Redis(), sessionHashTTL)
 	srv := gateway.New(client, logger, cfgStore, responses, chatCfg.RequestTimeoutS, port, llamaAddr, memoryAddr)
+	srv.RunBackground(ctx)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

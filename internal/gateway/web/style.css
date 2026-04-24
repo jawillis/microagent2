@@ -58,3 +58,15 @@ dd{color:var(--text)}
 .restart-banner{background:#3a2f1a;border:1px solid #8a6a2e;color:#f6c774;padding:0.5rem 0.75rem;border-radius:var(--radius);margin-bottom:0.75rem;font-size:0.85rem}
 #mcp-table code{font-size:0.8rem;color:var(--text-muted)}
 #mcp-form{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:0.75rem;margin-top:0.5rem}
+
+/* Descriptor-driven panels */
+.section{margin:1rem 0 1.5rem}
+.section h3{font-size:1rem;margin:0 0 0.5rem;color:var(--text)}
+.section-iframe iframe{border-radius:var(--radius)}
+.form-field{display:flex;flex-direction:column;gap:0.2rem;margin-bottom:0.6rem}
+.field-label{font-weight:500;color:var(--text)}
+.field-desc{color:var(--text-muted);font-size:0.8rem}
+.muted{color:var(--text-muted);font-style:italic}
+dl.kv{margin:0.5rem 0}
+#empty-state{padding:2rem;text-align:center;color:var(--text-muted)}
+.err{color:var(--err);padding:0.5rem;background:rgba(255,0,0,0.1);border-radius:var(--radius)}

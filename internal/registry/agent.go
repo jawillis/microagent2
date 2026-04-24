@@ -8,18 +8,23 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"microagent2/internal/dashboard"
 	"microagent2/internal/messaging"
 )
 
 type AgentInfo struct {
-	AgentID            string
-	Priority           int
-	Preemptible        bool
-	Capabilities       []string
-	Trigger            string
+	AgentID             string
+	Priority            int
+	Preemptible         bool
+	Capabilities        []string
+	Trigger             string
 	HeartbeatIntervalMS int
-	LastHeartbeat      time.Time
-	Alive              bool
+	LastHeartbeat       time.Time
+	Alive               bool
+	// DashboardPanel is the optional panel descriptor the service
+	// announced at registration. Nil when the service did not contribute
+	// a panel.
+	DashboardPanel *dashboard.PanelDescriptor
 }
 
 type AgentRegistrar struct {
