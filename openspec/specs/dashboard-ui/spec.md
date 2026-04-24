@@ -1,5 +1,3 @@
-## ADDED Requirements
-
 ### Requirement: Dashboard served from gateway
 The gateway SHALL serve a static HTML/CSS/JS dashboard at `GET /`. The dashboard files SHALL be embedded in the gateway binary using Go's `embed.FS`.
 
@@ -8,40 +6,19 @@ The gateway SHALL serve a static HTML/CSS/JS dashboard at `GET /`. The dashboard
 - **THEN** the gateway SHALL serve the dashboard HTML page with associated CSS and JS assets
 
 ### Requirement: Dashboard has five panels
-The dashboard SHALL provide five navigable panels: Chat, Memory, Agents, Sessions, and System. Navigation between panels SHALL not require full page reloads.
+The dashboard SHALL compose its panels from `GET /v1/dashboard/panels`. Initial built-in panels (Chat, Sessions, System) SHALL be registered by the gateway itself so they continue to appear alongside service-contributed panels. The Memory and Agents panels SHALL be contributed by memory-service and llm-broker respectively (not built-in to the gateway), as part of the follow-up capability proposals.
+
+#### Scenario: Panel composition on load
+- **WHEN** the dashboard HTML is loaded
+- **THEN** the dashboard JS SHALL fetch `GET /v1/dashboard/panels` and render a tab + panel container for each returned descriptor, in the order returned by the endpoint
 
 #### Scenario: Panel navigation
 - **WHEN** the user clicks a panel tab
-- **THEN** the dashboard SHALL display the selected panel's content without a page reload
+- **THEN** the dashboard SHALL display the selected panel's content without a full page reload
 
-### Requirement: Chat panel
-The Chat panel SHALL display editable fields for: system prompt (textarea), model name (text input), and request timeout in seconds (number input). A save button SHALL PUT the values to `PUT /v1/config` with section `chat`.
-
-#### Scenario: Edit and save chat config
-- **WHEN** the user modifies the system prompt and clicks save
-- **THEN** the dashboard SHALL send a PUT request to `/v1/config` with the chat section values
-
-### Requirement: Memory panel
-The Memory panel SHALL display editable fields for: recall limit, recall threshold, max hops, pre-warm limit, vault name, and store confidence. A save button SHALL PUT the values to `PUT /v1/config` with section `memory`.
-
-#### Scenario: Edit and save memory config
-- **WHEN** the user modifies recall settings and clicks save
-- **THEN** the dashboard SHALL send a PUT request to `/v1/config` with the memory section values
-
-### Requirement: Agents panel
-The Agents panel SHALL display three sub-sections:
-
-1. **Slot Management**: Editable fields for slot count and preempt timeout, with save button
-2. **Agent Registry**: Read-only table showing registered agents with agent ID, priority, preemptible flag, heartbeat interval, and alive status. This data SHALL be fetched from `GET /v1/status`
-3. **Retrospection Policy**: Editable fields for inactivity timeout, skill duplicate threshold, minimum history turns, and curation categories, with save button
-
-#### Scenario: View registered agents
-- **WHEN** the Agents panel is displayed
-- **THEN** the agent registry table SHALL show current agent status from the status endpoint
-
-#### Scenario: Save broker settings
-- **WHEN** the user modifies slot count and clicks save
-- **THEN** the dashboard SHALL send a PUT request to `/v1/config` with the broker section values
+#### Scenario: Zero panels
+- **WHEN** the endpoint returns zero panels (e.g. during a brief window where no service has registered yet)
+- **THEN** the dashboard SHALL render an empty state message rather than a blank page
 
 ### Requirement: Sessions panel
 The Sessions panel SHALL display a table of active sessions with session ID, turn count, and last active time. Each session row SHALL have View and Delete action buttons. View SHALL display the session's chat history. Delete SHALL call `DELETE /v1/sessions/:id` and remove the row.
@@ -71,8 +48,6 @@ The System panel SHALL display health check results for Valkey, llama.cpp, and M
 - **WHEN** a service (e.g., MuninnDB) is unreachable
 - **THEN** the System panel SHALL show a red disconnected indicator for that service
 
-## ADDED Requirements
-
 ### Requirement: Chat transcript renders tool-call events as collapsed status blocks
 The dashboard's Chat panel transcript SHALL render each tool-call event received via the streaming `response.tool_call` SSE event kind as a collapsed status block, visually distinct from user and assistant text turns, showing the tool name and a disclosure affordance to expand and inspect the arguments. Tool-result messages (assistant turns referencing `tool_call_id` results) SHALL render in the same collapsed style.
 
@@ -94,8 +69,6 @@ The collapsed tool-call status blocks SHALL be keyboard-operable with native dis
 #### Scenario: Keyboard activation
 - **WHEN** the user focuses a collapsed tool-call block and presses Enter or Space
 - **THEN** the block SHALL toggle between collapsed and expanded states
-
-## ADDED Requirements
 
 ### Requirement: MCP servers subsection on Agents panel
 The Agents panel SHALL include a new subsection for managing MCP servers. It SHALL display a table of servers (name, enabled, command, connected, tool count, last error), an "Add server" button that opens a form (name, command, args, env, enabled), per-row Edit and Delete buttons, and a persistent banner at the top of the subsection that reads "Restart main-agent to apply MCP config changes" whenever the stored config differs from the live state reported on `/v1/status`.
@@ -123,3 +96,29 @@ The Agents panel SHALL include a new subsection for managing MCP servers. It SHA
 #### Scenario: Banner absent on empty config
 - **WHEN** both `/v1/mcp/servers` and `/v1/status.mcp_servers` are empty
 - **THEN** the banner SHALL NOT be visible and no drift state SHALL be reported
+
+### Requirement: Dashboard renders descriptor-driven panels
+The dashboard JS SHALL render each panel from its descriptor by interpreting the `sections` array. Section rendering follows the rules in the `dashboard-panel-registry` capability (form / iframe / status).
+
+#### Scenario: Form section rendered
+- **WHEN** a panel contains a section with `kind: "form"` and a `fields` object
+- **THEN** the dashboard SHALL render a form with one input per field according to the field's `type` and constraints, a save button, and MAY include a status indicator for save success/failure
+
+#### Scenario: Form save round-trip
+- **WHEN** the user modifies form values and clicks save
+- **THEN** the dashboard SHALL PUT `/v1/config` with `{"section": <config_key>, "values": <form_data>}`, display success on HTTP 200, and display the error message on non-2xx
+
+#### Scenario: Iframe section rendered
+- **WHEN** a panel contains a section with `kind: "iframe"` and a `url`
+- **THEN** the dashboard SHALL render an `<iframe src="<url>" sandbox="allow-scripts allow-same-origin allow-forms">` at the declared `height` (or 600px default)
+
+#### Scenario: Status section rendered
+- **WHEN** a panel contains a section with `kind: "status"`, a `url`, and a `layout`
+- **THEN** the dashboard SHALL GET the URL and render the response as key-value pairs (if `layout: "key_value"`) or as a table (if `layout: "table"`)
+
+### Requirement: Dashboard re-fetches panels on refresh
+A full page refresh SHALL cause the dashboard to re-fetch `GET /v1/dashboard/panels` and recompose the UI. Runtime panel hot-reload is not in scope.
+
+#### Scenario: Operator refreshes after new service deploys
+- **WHEN** a new service with a panel descriptor starts up, and the operator refreshes the dashboard
+- **THEN** the new panel SHALL appear in the tab list
