@@ -24,7 +24,8 @@ func setupServer(t *testing.T, cfg *Config, skills []SkillInfo) *httptest.Server
 	health := NewHealth()
 	inst := NewInstaller(cfg, health, logger)
 	runner := NewRunner(cfg, inst, logger)
-	s := NewServer(cfg, runner, inst, health, logger, skills)
+	bashRunner := NewBashRunner(cfg, logger)
+	s := NewServer(cfg, runner, bashRunner, inst, health, logger, skills)
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -267,4 +268,66 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// ---- Bash endpoint tests ----
+
+func TestServer_BashHappyPath(t *testing.T) {
+	ts := setupServer(t, testRunnerCfg(t), nil)
+	resp := doPost(t, ts, "/v1/bash", BashRequest{Command: "echo hi", SessionID: "sess"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body BashResponse
+	readJSON(t, resp, &body)
+	if body.ExitCode != 0 || strings.TrimSpace(body.Stdout) != "hi" {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
+func TestServer_BashWrongMethodReturns405(t *testing.T) {
+	ts := setupServer(t, testRunnerCfg(t), nil)
+	resp := doGet(t, ts, "/v1/bash")
+	if resp.StatusCode != 405 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestServer_BashMissingCommandReturns400(t *testing.T) {
+	ts := setupServer(t, testRunnerCfg(t), nil)
+	resp := doPost(t, ts, "/v1/bash", BashRequest{SessionID: "s"})
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestServer_BashMissingSessionReturns400(t *testing.T) {
+	ts := setupServer(t, testRunnerCfg(t), nil)
+	resp := doPost(t, ts, "/v1/bash", BashRequest{Command: "echo hi"})
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestServer_BashNetworkDenyRejects(t *testing.T) {
+	cfg := testRunnerCfg(t)
+	cfg.NetworkDefault = NetDeny
+	ts := setupServer(t, cfg, nil)
+	resp := doPost(t, ts, "/v1/bash", BashRequest{Command: "echo hi", SessionID: "s"})
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body map[string]string
+	readJSON(t, resp, &body)
+	if !strings.Contains(body["error"], "denies bash") {
+		t.Fatalf("error: %q", body["error"])
+	}
+}
+
+func TestServer_BashUnknownPathStill404(t *testing.T) {
+	ts := setupServer(t, testRunnerCfg(t), nil)
+	resp := doGet(t, ts, "/v1/bash-bogus")
+	if resp.StatusCode != 404 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
 }

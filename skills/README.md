@@ -119,6 +119,33 @@ Trade-off: prewarming speeds up first-run but slows container boot. Use it
 for frequently-used heavy skills (Playwright-based testing, large package
 sets); omit it for rarely-used skills.
 
+## Authoring skills in the sandbox
+
+The `bash` built-in tool lets the agent iterate on new skills interactively.
+Commands run in `/sandbox/<session_id>/`, a session-persistent workspace that
+keeps files across calls within the same chat session (reclaimed after 60
+minutes of inactivity). `/skills` itself is not accessible from `bash` —
+agents use `read_skill_file` to inspect existing skills and draft new ones in
+the sandbox:
+
+```
+bash(command="mkdir -p draft/scripts && echo 'print(\"hi\")' > draft/scripts/hello.py")
+bash(command="python draft/scripts/hello.py")
+bash(command="cat <<'EOF' > draft/SKILL.md
+---
+name: my-skill
+description: ...
+---
+Body goes here.
+EOF")
+```
+
+Finished drafts stay in the sandbox until reclaimed. Publishing a skill to
+the repository-tracked `skills/` directory is currently a manual operator
+step — inspect the sandbox contents (`docker compose exec exec ls
+/sandbox/<session>/`), copy what you want into `skills/<name>/`, and restart
+main-agent so the skills store picks up the new directory.
+
 ## Hot reload
 
 Not supported. Restart main-agent to pick up changes. The `exec` service

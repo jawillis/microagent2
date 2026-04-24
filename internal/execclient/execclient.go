@@ -24,6 +24,8 @@ type (
 	InstallRequest  = exec.InstallRequest
 	InstallResponse = exec.InstallResponse
 	HealthResponse  = exec.HealthResponse
+	BashRequest     = exec.BashRequest
+	BashResponse    = exec.BashResponse
 )
 
 // Client is a thin HTTP wrapper over exec's JSON API.
@@ -98,6 +100,15 @@ func (c *Client) Install(ctx context.Context, skill string) (*InstallResponse, e
 func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	var resp HealthResponse
 	if err := c.do(ctx, http.MethodGet, "/v1/health", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// Bash invokes POST /v1/bash and decodes the envelope.
+func (c *Client) Bash(ctx context.Context, req *BashRequest) (*BashResponse, error) {
+	var resp BashResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/bash", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

@@ -28,6 +28,14 @@ import (
 
 const activeSkillTTL = 24 * time.Hour
 
+// sessionScopedTools lists built-in tool names whose argsJSON has
+// session_id injected by main-agent before invocation, overriding any
+// model-supplied value.
+var sessionScopedTools = map[string]struct{}{
+	"run_skill_script": {},
+	"bash":             {},
+}
+
 // requestDeps bundles the per-request dependencies so handleRequest's signature
 // stays readable after session-state plumbing landed.
 type requestDeps struct {
@@ -90,6 +98,10 @@ func main() {
 	)
 	if err := toolRegistry.Register(tools.NewRunSkillScript(execClient, logger)); err != nil {
 		logger.Error("register run_skill_script", "error", err)
+		os.Exit(1)
+	}
+	if err := toolRegistry.Register(tools.NewBash(execClient, logger)); err != nil {
+		logger.Error("register bash", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("exec_client_configured", "addr", execAddr, "timeout_s", execMaxTimeoutS+10)
@@ -401,7 +413,7 @@ func (d *requestDeps) invokeOrGate(ctx context.Context, call messaging.ToolCall,
 		return envelope, 0, len(envelope), "gated"
 	}
 	args := call.Function.Arguments
-	if call.Function.Name == "run_skill_script" {
+	if _, scoped := sessionScopedTools[call.Function.Name]; scoped {
 		args = injectSessionID(args, sessionID)
 	}
 	res, _ := d.registry.Invoke(ctx, call.Function.Name, args)

@@ -16,13 +16,14 @@ import (
 // 1 MB is generous for a JSON envelope describing args + stdin.
 const maxRequestBodyBytes = 1 << 20
 
-// Server wires config, runner, installer, and health into HTTP handlers.
+// Server wires config, runners, installer, and health into HTTP handlers.
 type Server struct {
-	cfg       *Config
-	runner    *Runner
-	installer *Installer
-	health    *Health
-	logger    *slog.Logger
+	cfg         *Config
+	runner      *Runner
+	bashRunner  *BashRunner
+	installer   *Installer
+	health      *Health
+	logger      *slog.Logger
 
 	skillsMu sync.RWMutex
 	skills   []SkillInfo
@@ -31,24 +32,26 @@ type Server struct {
 // NewServer constructs a Server. skills is the initial scan snapshot (see
 // ScanSkills). It can be refreshed later via ReplaceSkills if future work
 // adds hot-reload; v1 scans once at boot.
-func NewServer(cfg *Config, runner *Runner, installer *Installer, health *Health, logger *slog.Logger, skills []SkillInfo) *Server {
+func NewServer(cfg *Config, runner *Runner, bashRunner *BashRunner, installer *Installer, health *Health, logger *slog.Logger, skills []SkillInfo) *Server {
 	return &Server{
-		cfg:       cfg,
-		runner:    runner,
-		installer: installer,
-		health:    health,
-		logger:    logger,
-		skills:    skills,
+		cfg:        cfg,
+		runner:     runner,
+		bashRunner: bashRunner,
+		installer:  installer,
+		health:     health,
+		logger:     logger,
+		skills:     skills,
 	}
 }
 
-// Handler returns the configured HTTP handler. Paths other than the three
-// documented endpoints return 404.
+// Handler returns the configured HTTP handler. Paths other than the documented
+// endpoints return 404.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/run", s.handleRun)
 	mux.HandleFunc("/v1/install", s.handleInstall)
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/bash", s.handleBash)
 	return notFoundFallback(mux)
 }
 
@@ -57,7 +60,7 @@ func (s *Server) Handler() http.Handler {
 func notFoundFallback(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/run", "/v1/install", "/v1/health":
+		case "/v1/run", "/v1/install", "/v1/health", "/v1/bash":
 			h.ServeHTTP(w, r)
 		default:
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
@@ -170,6 +173,50 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 		DurationMS: res.DurationMS,
 		Error:      res.Error,
 	})
+}
+
+func (s *Server) handleBash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req BashRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.Command == "" {
+		s.logger.Info("exec_bash_rejected", "session_id", req.SessionID, "reason", "missing_command")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
+		return
+	}
+	if req.SessionID == "" {
+		s.logger.Info("exec_bash_rejected", "reason", "missing_session_id")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id is required"})
+		return
+	}
+
+	// Network policy: when the operator default is deny, bash is blocked
+	// wholesale. The per-skill deny-list doesn't apply to bash (bash isn't
+	// scoped to a skill).
+	if s.cfg.NetworkDefault == NetDeny {
+		s.logger.Info("exec_bash_rejected", "session_id", req.SessionID, "reason", "network_denied")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "network policy denies bash"})
+		return
+	}
+
+	resp, err := s.bashRunner.Run(r.Context(), &req)
+	if err != nil {
+		if errors.Is(err, ErrWorkspaceFull) {
+			s.logger.Info("exec_bash_rejected", "session_id", req.SessionID, "reason", "sandbox_full")
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		s.logger.Error("exec_bash_internal", "session_id", req.SessionID, "error", err.Error())
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

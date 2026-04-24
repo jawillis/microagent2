@@ -780,3 +780,185 @@ func TestRunSkillScript_OtherToolsUnaffectedBySessionInject(t *testing.T) {
 		t.Fatalf("list_skills output = %q, want []", resp.ToolResults[0].Output)
 	}
 }
+
+// --- agent-bash-sandbox tests ---
+
+// captureBashExec is captureExec's bash-shaped sibling: records every
+// /v1/bash request body and returns the supplied envelope.
+func captureBashExec(t *testing.T, envelope string) (*execclient.Client, *sync.Mutex, *[]execclient.BashRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var captured []execclient.BashRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/bash" {
+			http.NotFound(w, r)
+			return
+		}
+		var req execclient.BashRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		captured = append(captured, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(envelope))
+	}))
+	t.Cleanup(srv.Close)
+	return execclient.New(srv.URL, execclient.WithTimeout(5*time.Second)), &mu, &captured
+}
+
+func TestBash_EnvelopeReturnsInToolResult(t *testing.T) {
+	envelope := `{"exit_code":0,"stdout":"hi from bash\n","stdout_truncated":false,"stderr":"","stderr_truncated":false,"sandbox_dir":"/sandbox/s","duration_ms":4,"timed_out":false}`
+	client, _, _ := captureBashExec(t, envelope)
+
+	harnessClient, logger, _, cleanup := newTestHarness(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	skillsRoot := t.TempDir()
+	store := skills.NewStore(skillsRoot, logger)
+	reg := registerBuiltinsPlusCustom(t, store, logger, tools.NewBash(client, logger))
+
+	deps := &requestDeps{
+		client:    harnessClient,
+		runtime:   agent.NewRuntime(harnessClient, "main-agent", 0, false, logger),
+		registry:  reg,
+		store:     store,
+		rdb:       harnessClient.Redis(),
+		baseTools: []string{"list_skills", "read_skill", "read_skill_file", "current_time", "bash"},
+		maxIter:   5,
+		logger:    logger,
+	}
+
+	steps := []scriptStep{
+		{toolCalls: []messaging.ToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: messaging.ToolCallFunction{Name: "bash", Arguments: `{"command":"echo hi"}`},
+		}}},
+		{finalText: "done"},
+	}
+	brokerDone := runStubBroker(ctx, t, harnessClient, steps)
+
+	req := buildPayload("sess-bash")
+	var payload messaging.ContextAssembledPayload
+	_ = json.Unmarshal(req.Payload, &payload)
+	handleRequest(ctx, deps, req)
+	<-brokerDone
+
+	_ = harnessClient.EnsureGroup(ctx, payload.ReplyStream, "cg:bash-env")
+	msgs, _, err := harnessClient.ReadGroup(ctx, payload.ReplyStream, "cg:bash-env", "r", 1, 1*time.Second)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("no reply: err=%v", err)
+	}
+	var resp messaging.ChatResponsePayload
+	_ = msgs[0].DecodePayload(&resp)
+	if len(resp.ToolResults) != 1 {
+		t.Fatalf("tool_results = %d", len(resp.ToolResults))
+	}
+	if !strings.Contains(resp.ToolResults[0].Output, `"hi from bash`) {
+		t.Fatalf("envelope missing: %q", resp.ToolResults[0].Output)
+	}
+}
+
+func TestBash_SessionIDInjectedFromTurn(t *testing.T) {
+	envelope := `{"exit_code":0,"stdout":"","stdout_truncated":false,"stderr":"","stderr_truncated":false,"sandbox_dir":"","duration_ms":1,"timed_out":false}`
+	client, mu, captured := captureBashExec(t, envelope)
+
+	harnessClient, logger, _, cleanup := newTestHarness(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	skillsRoot := t.TempDir()
+	store := skills.NewStore(skillsRoot, logger)
+	reg := registerBuiltinsPlusCustom(t, store, logger, tools.NewBash(client, logger))
+
+	deps := &requestDeps{
+		client:    harnessClient,
+		runtime:   agent.NewRuntime(harnessClient, "main-agent", 0, false, logger),
+		registry:  reg,
+		store:     store,
+		rdb:       harnessClient.Redis(),
+		baseTools: []string{"list_skills", "read_skill", "read_skill_file", "current_time", "bash"},
+		maxIter:   5,
+		logger:    logger,
+	}
+
+	// Model supplies a bogus session_id — main-agent must override with the
+	// turn's real session before dispatching to exec.
+	steps := []scriptStep{
+		{toolCalls: []messaging.ToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: messaging.ToolCallFunction{Name: "bash", Arguments: `{"command":"echo x","session_id":"attacker"}`},
+		}}},
+		{finalText: "done"},
+	}
+	brokerDone := runStubBroker(ctx, t, harnessClient, steps)
+	handleRequest(ctx, deps, buildPayload("bash-real-session"))
+	<-brokerDone
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*captured) != 1 {
+		t.Fatalf("expected 1 exec call, got %d", len(*captured))
+	}
+	if got := (*captured)[0].SessionID; got != "bash-real-session" {
+		t.Errorf("exec saw session_id %q, want bash-real-session (model tried %q)", got, "attacker")
+	}
+}
+
+func TestBash_ExecUnavailableSurfacedToModel(t *testing.T) {
+	client := execclient.New("http://127.0.0.1:1", execclient.WithTimeout(500*time.Millisecond))
+
+	harnessClient, logger, _, cleanup := newTestHarness(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	skillsRoot := t.TempDir()
+	store := skills.NewStore(skillsRoot, logger)
+	reg := registerBuiltinsPlusCustom(t, store, logger, tools.NewBash(client, logger))
+
+	deps := &requestDeps{
+		client:    harnessClient,
+		runtime:   agent.NewRuntime(harnessClient, "main-agent", 0, false, logger),
+		registry:  reg,
+		store:     store,
+		rdb:       harnessClient.Redis(),
+		baseTools: []string{"list_skills", "read_skill", "read_skill_file", "current_time", "bash"},
+		maxIter:   5,
+		logger:    logger,
+	}
+
+	steps := []scriptStep{
+		{toolCalls: []messaging.ToolCall{{
+			ID:       "c1",
+			Type:     "function",
+			Function: messaging.ToolCallFunction{Name: "bash", Arguments: `{"command":"echo x"}`},
+		}}},
+		{finalText: "done"},
+	}
+	brokerDone := runStubBroker(ctx, t, harnessClient, steps)
+
+	req := buildPayload("sess-bash-unavail")
+	var payload messaging.ContextAssembledPayload
+	_ = json.Unmarshal(req.Payload, &payload)
+	handleRequest(ctx, deps, req)
+	<-brokerDone
+
+	_ = harnessClient.EnsureGroup(ctx, payload.ReplyStream, "cg:bash-unavail")
+	msgs, _, err := harnessClient.ReadGroup(ctx, payload.ReplyStream, "cg:bash-unavail", "r", 1, 1*time.Second)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("no reply")
+	}
+	var resp messaging.ChatResponsePayload
+	_ = msgs[0].DecodePayload(&resp)
+	if !strings.Contains(resp.ToolResults[0].Output, "exec unavailable") {
+		t.Fatalf("expected exec-unavailable envelope; got %q", resp.ToolResults[0].Output)
+	}
+}

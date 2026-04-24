@@ -30,6 +30,9 @@ type Config struct {
 	SkillsDir                string
 	CacheDir                 string
 	WorkspaceDir             string
+	SandboxDir               string
+	SandboxRetention         time.Duration
+	SandboxGCInterval        time.Duration
 	PythonVersion            string
 	UVBin                    string
 }
@@ -59,6 +62,9 @@ func Load(logger *slog.Logger) *Config {
 		SkillsDir:          envOr("SKILLS_DIR", "/skills"),
 		CacheDir:           envOr("CACHE_DIR", "/cache"),
 		WorkspaceDir:       envOr("WORKSPACE_DIR", "/workspace"),
+		SandboxDir:         envOr("SANDBOX_DIR", "/sandbox"),
+		SandboxRetention:   time.Duration(envInt(logger, "EXEC_SANDBOX_RETENTION_MINUTES", 60)) * time.Minute,
+		SandboxGCInterval:  time.Duration(envInt(logger, "EXEC_SANDBOX_GC_INTERVAL_MINUTES", 5)) * time.Minute,
 		PythonVersion:      envOr("PYTHON_VERSION", "3.12"),
 		UVBin:              envOr("UV_BIN", "uv"),
 	}
@@ -127,11 +133,12 @@ func envSkillSet(logger *slog.Logger, key string) map[string]struct{} {
 // String hides secrets and gives operators a one-line view on startup.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"port=%d max_timeout=%s stdout_cap=%d stderr_cap=%d retention=%s gc=%s prewarm=%d install_timeout=%s shutdown_grace=%s net_default=%s net_deny=%d skills_dir=%s cache_dir=%s workspace_dir=%s python=%s",
+		"port=%d max_timeout=%s stdout_cap=%d stderr_cap=%d retention=%s gc=%s prewarm=%d install_timeout=%s shutdown_grace=%s net_default=%s net_deny=%d skills_dir=%s cache_dir=%s workspace_dir=%s sandbox_dir=%s sandbox_retention=%s sandbox_gc=%s python=%s",
 		c.Port, c.MaxTimeout, c.StdoutCapBytes, c.StderrCapBytes,
 		c.WorkspaceRetention, c.GCInterval, c.PrewarmConcurrency,
 		c.InstallTimeout, c.ShutdownGrace, c.NetworkDefault,
 		len(c.NetworkDenySkills), c.SkillsDir, c.CacheDir,
-		c.WorkspaceDir, c.PythonVersion,
+		c.WorkspaceDir, c.SandboxDir, c.SandboxRetention, c.SandboxGCInterval,
+		c.PythonVersion,
 	)
 }

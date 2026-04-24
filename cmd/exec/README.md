@@ -46,6 +46,27 @@ POST /v1/install
 Request:  {"skill": "<name>"}
 Response: {"status": "ok" | "error", "duration_ms": 1234, "error": "..."}
 
+POST /v1/bash
+Request:
+  {
+    "command":    "echo hi && ls",   // required; runs via sh -c
+    "session_id": "sess-abc",        // required; scopes the persistent /sandbox dir
+    "timeout_s":  30                  // optional
+  }
+Response:
+  {
+    "exit_code": 0,
+    "stdout": "hi\n...",
+    "stdout_truncated": false,
+    "stderr": "",
+    "stderr_truncated": false,
+    "sandbox_dir": "/sandbox/sess-abc",
+    "duration_ms": 3,
+    "timed_out": false
+  }
+# Files created in /sandbox/<session>/ persist across calls with the same
+# session_id until EXEC_SANDBOX_RETENTION_MINUTES (default 60) of inactivity.
+
 GET /v1/health
 Response:
   {
@@ -91,7 +112,10 @@ operators tune via `docker-compose.yml` or the process env.
 | `EXEC_INSTALL_TIMEOUT_S` | 600 | Per-install deadline |
 | `EXEC_SHUTDOWN_GRACE_S` | MaxTimeout+5 | SIGTERM → forced-exit window |
 | `EXEC_NETWORK_DEFAULT` | allow | `allow` or `deny` |
-| `EXEC_NETWORK_DENY_SKILLS` | (empty) | Comma-separated skill names to always deny |
+| `EXEC_NETWORK_DENY_SKILLS` | (empty) | Comma-separated skill names to always deny (only applies to `/v1/run`, not `/v1/bash`) |
+| `EXEC_SANDBOX_RETENTION_MINUTES` | 60 | Touch-based retention for `/sandbox/<session>/` dirs used by `/v1/bash` |
+| `EXEC_SANDBOX_GC_INTERVAL_MINUTES` | 5 | Sandbox GC sweep cadence |
+| `SANDBOX_DIR` | /sandbox | Per-session persistent workspace mount used by `/v1/bash` |
 | `SKILLS_DIR` | /skills | Read-only bind-mount of the project's skills |
 | `CACHE_DIR` | /cache | Per-skill venv cache; persistent volume |
 | `WORKSPACE_DIR` | /workspace | Per-invocation scratch; tmpfs-backed in containers |

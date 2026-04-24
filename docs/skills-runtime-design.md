@@ -480,6 +480,13 @@ Decisions explicitly deferred beyond v1:
 - **Active-skill persistence across session.** Active skill is in-memory.
   Replaying a session from persistence does not restore the previously
   active skill; the replay starts clean.
+- **Publishing agent-authored skills to `/skills/`.** The `bash` tool
+  (agent-bash-sandbox, landed separately from the four-change parity
+  sequence) gives the agent an authoring environment, but finished drafts
+  live in `/sandbox/<session>/` only. An operator copies worthwhile
+  artifacts into `skills/<name>/` manually. An automatic promotion
+  mechanism is a future change with its own threat model (agent-written
+  code becoming authoritative for subsequent sessions).
 
 ## 10. Open questions these proposals will resolve
 

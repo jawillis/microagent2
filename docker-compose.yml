@@ -212,15 +212,19 @@ services:
       - EXEC_INSTALL_TIMEOUT_S=${EXEC_INSTALL_TIMEOUT_S:-600}
       - EXEC_NETWORK_DEFAULT=${EXEC_NETWORK_DEFAULT:-allow}
       - EXEC_NETWORK_DENY_SKILLS=${EXEC_NETWORK_DENY_SKILLS:-}
+      - EXEC_SANDBOX_RETENTION_MINUTES=${EXEC_SANDBOX_RETENTION_MINUTES:-60}
+      - EXEC_SANDBOX_GC_INTERVAL_MINUTES=${EXEC_SANDBOX_GC_INTERVAL_MINUTES:-5}
       - SKILLS_DIR=/skills
       - CACHE_DIR=/cache
       - WORKSPACE_DIR=/workspace
+      - SANDBOX_DIR=/sandbox
       - PYTHON_VERSION=3.12
     volumes:
       - ./skills:/skills:ro
       - exec-cache:/cache
     tmpfs:
       - /workspace:size=64m,mode=1777
+      - /sandbox:size=128m,mode=1777
     cap_drop:
       - ALL
     networks:

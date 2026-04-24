@@ -39,6 +39,7 @@ func testRunnerCfg(t *testing.T) *Config {
 	return &Config{
 		WorkspaceDir:      t.TempDir(),
 		CacheDir:          t.TempDir(),
+		SandboxDir:        t.TempDir(),
 		MaxTimeout:        5 * time.Second,
 		StdoutCapBytes:    32,
 		StderrCapBytes:    32,

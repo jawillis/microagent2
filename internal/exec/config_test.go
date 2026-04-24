@@ -18,7 +18,9 @@ func TestConfig_Defaults(t *testing.T) {
 		"EXEC_PORT", "EXEC_MAX_TIMEOUT_S", "EXEC_STDOUT_CAP_BYTES", "EXEC_STDERR_CAP_BYTES",
 		"EXEC_WORKSPACE_RETENTION_MINUTES", "EXEC_GC_INTERVAL_MINUTES", "EXEC_PREWARM_CONCURRENCY",
 		"EXEC_INSTALL_TIMEOUT_S", "EXEC_SHUTDOWN_GRACE_S", "EXEC_NETWORK_DEFAULT",
-		"EXEC_NETWORK_DENY_SKILLS", "SKILLS_DIR", "CACHE_DIR", "WORKSPACE_DIR", "PYTHON_VERSION", "UV_BIN",
+		"EXEC_NETWORK_DENY_SKILLS", "SKILLS_DIR", "CACHE_DIR", "WORKSPACE_DIR", "SANDBOX_DIR",
+		"EXEC_SANDBOX_RETENTION_MINUTES", "EXEC_SANDBOX_GC_INTERVAL_MINUTES",
+		"PYTHON_VERSION", "UV_BIN",
 	} {
 		t.Setenv(k, "")
 	}
@@ -67,6 +69,39 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 	if c.UVBin != "uv" {
 		t.Errorf("UVBin = %q", c.UVBin)
+	}
+	if c.SandboxDir != "/sandbox" {
+		t.Errorf("SandboxDir = %q", c.SandboxDir)
+	}
+	if c.SandboxRetention != 60*time.Minute {
+		t.Errorf("SandboxRetention = %v, want 60m", c.SandboxRetention)
+	}
+	if c.SandboxGCInterval != 5*time.Minute {
+		t.Errorf("SandboxGCInterval = %v, want 5m", c.SandboxGCInterval)
+	}
+}
+
+func TestConfig_SandboxEnvOverrides(t *testing.T) {
+	t.Setenv("SANDBOX_DIR", "/tmp/sandbox")
+	t.Setenv("EXEC_SANDBOX_RETENTION_MINUTES", "15")
+	t.Setenv("EXEC_SANDBOX_GC_INTERVAL_MINUTES", "2")
+	c := Load(slog.Default())
+	if c.SandboxDir != "/tmp/sandbox" {
+		t.Errorf("SandboxDir = %q", c.SandboxDir)
+	}
+	if c.SandboxRetention != 15*time.Minute {
+		t.Errorf("SandboxRetention = %v", c.SandboxRetention)
+	}
+	if c.SandboxGCInterval != 2*time.Minute {
+		t.Errorf("SandboxGCInterval = %v", c.SandboxGCInterval)
+	}
+}
+
+func TestConfig_SandboxInvalidFallsBack(t *testing.T) {
+	t.Setenv("EXEC_SANDBOX_RETENTION_MINUTES", "not-numeric")
+	c := Load(slog.Default())
+	if c.SandboxRetention != 60*time.Minute {
+		t.Errorf("should fall back to 60m, got %v", c.SandboxRetention)
 	}
 }
 

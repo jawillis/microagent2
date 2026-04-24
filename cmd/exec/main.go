@@ -27,9 +27,12 @@ func main() {
 	health := exec.NewHealth()
 	installer := exec.NewInstaller(cfg, health, logger)
 	runner := exec.NewRunner(cfg, installer, logger)
-	server := exec.NewServer(cfg, runner, installer, health, logger, skills)
+	bashRunner := exec.NewBashRunner(cfg, logger)
+	server := exec.NewServer(cfg, runner, bashRunner, installer, health, logger, skills)
 
-	// Start GC goroutine.
+	// Start GC goroutines: one for per-invocation workspaces, one for
+	// session-persistent sandboxes. Separate because the retention drivers
+	// are different (completion-based vs touch-based).
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	gc := &exec.GC{
@@ -39,6 +42,13 @@ func main() {
 		Logger:    logger,
 	}
 	go gc.Run(rootCtx)
+	sandboxGC := &exec.SandboxGC{
+		Root:      cfg.SandboxDir,
+		Retention: cfg.SandboxRetention,
+		Interval:  cfg.SandboxGCInterval,
+		Logger:    logger,
+	}
+	go sandboxGC.Run(rootCtx)
 
 	// Prewarm then flip Ready. Workspace root is created lazily by Allocate.
 	go func() {

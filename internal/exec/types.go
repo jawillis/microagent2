@@ -58,3 +58,22 @@ type HealthResponse struct {
 	PrewarmedSkills []string        `json:"prewarmed_skills"`
 	FailedInstalls  []FailedInstall `json:"failed_installs"`
 }
+
+// BashRequest is the decoded body of POST /v1/bash.
+type BashRequest struct {
+	Command   string `json:"command"`
+	SessionID string `json:"session_id"`
+	TimeoutS  int    `json:"timeout_s,omitempty"`
+}
+
+// BashResponse is the envelope for POST /v1/bash.
+type BashResponse struct {
+	ExitCode        int    `json:"exit_code"`
+	Stdout          string `json:"stdout"`
+	StdoutTruncated bool   `json:"stdout_truncated"`
+	Stderr          string `json:"stderr"`
+	StderrTruncated bool   `json:"stderr_truncated"`
+	SandboxDir      string `json:"sandbox_dir"`
+	DurationMS      int64  `json:"duration_ms"`
+	TimedOut        bool   `json:"timed_out"`
+}

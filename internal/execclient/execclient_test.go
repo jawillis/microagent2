@@ -140,6 +140,34 @@ func TestInstall_Success(t *testing.T) {
 	}
 }
 
+func TestBash_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/bash" || r.Method != http.MethodPost {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		var req BashRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Command != "echo hi" || req.SessionID != "sess" {
+			t.Errorf("req = %+v", req)
+		}
+		_ = json.NewEncoder(w).Encode(BashResponse{
+			ExitCode:   0,
+			Stdout:     "hi\n",
+			SandboxDir: "/sandbox/sess",
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	resp, err := c.Bash(context.Background(), &BashRequest{Command: "echo hi", SessionID: "sess"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ExitCode != 0 || resp.Stdout != "hi\n" || resp.SandboxDir != "/sandbox/sess" {
+		t.Fatalf("resp = %+v", resp)
+	}
+}
+
 func TestHealth_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/health" || r.Method != http.MethodGet {
