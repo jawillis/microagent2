@@ -40,6 +40,7 @@ discoverability, not the body.
 ### Optional frontmatter fields
 - `allowed-tools` (array of strings) — tools this skill is allowed to call when active. See "Tool gating" below. Omitted or empty means the skill exposes only the base toolset.
 - `model` (string) — reserved for future routing; parsed but not acted on today.
+- `x-microagent` (object) — microagent2-specific extensions, namespaced so other Anthropic-compatible runtimes ignore them. See "Prewarm" below.
 
 ## Progressive disclosure
 
@@ -73,9 +74,35 @@ An active skill with an empty `allowed-tools` narrows to the base only — handy
 
 Active skill state is stored in Valkey at `session:<session_id>:active-skill` with a 24h TTL. It persists across turns within a session and is cleared automatically when a new skill is loaded or when the stored skill is no longer present on disk.
 
+## Prewarm (exec service)
+
+Skills that ship executable helpers under `scripts/` can opt into dependency
+prewarming at `exec` service startup by adding a namespaced frontmatter flag:
+
+```markdown
+---
+name: webapp-testing
+description: ...
+x-microagent:
+  prewarm: true
+---
+```
+
+At boot, the `exec` container scans `skills/*/SKILL.md`, installs
+`scripts/requirements.txt` for each prewarm-opted skill concurrently (capped
+by `EXEC_PREWARM_CONCURRENCY`), and flips its `/v1/health` from `starting` to
+`ok` once all prewarm installs finish. Skills without the flag install
+lazily on first use; the first `run_skill_script` call pays the install
+latency.
+
+Trade-off: prewarming speeds up first-run but slows container boot. Use it
+for frequently-used heavy skills (Playwright-based testing, large package
+sets); omit it for rarely-used skills.
+
 ## Hot reload
 
-Not supported. Restart main-agent to pick up changes.
+Not supported. Restart main-agent to pick up changes. The `exec` service
+likewise scans skills only at boot.
 
 ## Invalid skills
 

@@ -193,6 +193,35 @@ services:
     networks:
       - microagent
 
+  exec:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.exec
+    environment:
+      - EXEC_PORT=8085
+      - EXEC_MAX_TIMEOUT_S=${EXEC_MAX_TIMEOUT_S:-120}
+      - EXEC_STDOUT_CAP_BYTES=${EXEC_STDOUT_CAP_BYTES:-16384}
+      - EXEC_STDERR_CAP_BYTES=${EXEC_STDERR_CAP_BYTES:-8192}
+      - EXEC_WORKSPACE_RETENTION_MINUTES=${EXEC_WORKSPACE_RETENTION_MINUTES:-60}
+      - EXEC_GC_INTERVAL_MINUTES=${EXEC_GC_INTERVAL_MINUTES:-5}
+      - EXEC_PREWARM_CONCURRENCY=${EXEC_PREWARM_CONCURRENCY:-4}
+      - EXEC_INSTALL_TIMEOUT_S=${EXEC_INSTALL_TIMEOUT_S:-600}
+      - EXEC_NETWORK_DEFAULT=${EXEC_NETWORK_DEFAULT:-allow}
+      - EXEC_NETWORK_DENY_SKILLS=${EXEC_NETWORK_DENY_SKILLS:-}
+      - SKILLS_DIR=/skills
+      - CACHE_DIR=/cache
+      - WORKSPACE_DIR=/workspace
+      - PYTHON_VERSION=3.12
+    volumes:
+      - ./skills:/skills:ro
+      - exec-cache:/cache
+    tmpfs:
+      - /workspace:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    networks:
+      - microagent
+
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     ports:
@@ -229,3 +258,4 @@ volumes:
   valkey-data:
   open-webui-data:
   hindsight-data:
+  exec-cache:
