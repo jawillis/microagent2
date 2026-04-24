@@ -22,7 +22,7 @@ The context manager SHALL emit structured INFO log lines at every significant ha
 ## MODIFIED Requirements
 
 ### Requirement: Context assembly with configurable memory settings
-The context manager SHALL assemble chat context by combining the system prompt, recalled memories, conversation history, and the current user message. The conversation history SHALL be received from the gateway as a resolved messages array (reconstructed from the response chain by the gateway). The context manager SHALL NOT resolve response chains or access response storage directly. The system prompt, recall limit, recall threshold, max hops, pre-warm limit, vault name, and store confidence SHALL be read from the config store at startup, with env var and hardcoded fallbacks.
+The context manager SHALL assemble chat context by combining the system prompt, recalled memories, conversation history, and the current user message. The conversation history SHALL be received from the gateway as a resolved messages array (reconstructed from the response chain by the gateway). The context manager SHALL NOT resolve response chains or access response storage directly. The system prompt, recall limit, recall threshold, max hops, pre-warm limit, vault name, and store confidence SHALL be read from the config store at startup, with env var and hardcoded fallbacks. The context manager SHALL consume requests via the resilient `ConsumeStream` helper so that consumer-group loss and other recoverable stream errors do not silently stall the pipeline.
 
 #### Scenario: Context assembly from gateway-provided history
 - **WHEN** the context manager receives a request on `stream:gateway:requests`
@@ -51,3 +51,7 @@ The context manager SHALL assemble chat context by combining the system prompt, 
 #### Scenario: Store confidence from config
 - **WHEN** the retro agent stores a new memory via MuninnDB
 - **THEN** it SHALL use `store_confidence` from `config:memory` as the confidence value
+
+#### Scenario: Resilient consume loop
+- **WHEN** the context manager starts
+- **THEN** it SHALL read from `stream:gateway:requests` using the resilient `ConsumeStream` helper, which recovers from consumer-group loss and surfaces error classes via logs
