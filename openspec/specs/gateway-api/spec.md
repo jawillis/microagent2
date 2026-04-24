@@ -185,9 +185,16 @@ A session built via stitching SHALL be indistinguishable downstream from a sessi
 ### Requirement: Gateway collects tool-call events for storage only
 For any streaming `/v1/responses` request, the gateway SHALL subscribe to `channel:tool-calls:{session_id}` alongside `channel:tokens:{session_id}` to collect internal tool-call events for persistence in the stored response, but SHALL NOT relay these events to the client as SSE events. The client didn't request tool calling (tools are server-configured built-ins); the internal agent loop's trace is an implementation detail hidden from the API surface.
 
+The gateway SHALL emit the OpenAI-spec Responses SSE event sequence to the client: `response.created`, `response.in_progress`, then (on first text token) `response.output_item.added` and `response.content_part.added`, followed by `response.output_text.delta` per token, followed by `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, and finally `response.completed`. No `response.tool_call` or `response.tool_result` events SHALL reach the client.
+
 #### Scenario: Client-facing SSE stream is text-only
 - **WHEN** the gateway is streaming a `/v1/responses` turn whose agent loop invokes one or more tools
-- **THEN** the SSE events emitted to the HTTP client SHALL be limited to `response.created`, `response.output_text.delta`, and `response.completed`; no `response.tool_call` or `response.tool_result` events SHALL reach the client
+- **THEN** the SSE events emitted to the HTTP client SHALL be drawn from the OpenAI-spec Responses sequence (`response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, `response.completed`); no `response.tool_call` or `response.tool_result` events SHALL reach the client
+
+#### Scenario: Spec-compliant event sequence
+- **WHEN** the gateway streams a `/v1/responses` turn that produces assistant text
+- **THEN** the client SHALL receive, in order: one `response.created`, one `response.in_progress`, one `response.output_item.added` (on first text token), one `response.content_part.added` (on first text token), one or more `response.output_text.delta`, one `response.output_text.done`, one `response.content_part.done`, one `response.output_item.done`, and one `response.completed`
+- **AND** each delta event SHALL carry `item_id`, `output_index`, and `content_index` fields so clients can route the delta to the correct output item
 
 #### Scenario: Tool-call subscription used for storage
 - **WHEN** the gateway receives a `TypeToolCall` or `TypeToolResult` message on `channel:tool-calls:{session_id}` during a streaming turn

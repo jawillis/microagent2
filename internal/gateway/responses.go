@@ -270,9 +270,27 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 		flusher.Flush()
 	}
 
+	// response.in_progress follows created immediately per OpenAI's SSE
+	// event sequence. Spec-compliant clients (including Open WebUI's
+	// Responses API parser) gate rendering on this scaffolding — without
+	// it they buffer all deltas until response.completed.
+	if data, err := json.Marshal(map[string]any{
+		"type":     "response.in_progress",
+		"response": createdEvent,
+	}); err == nil {
+		fmt.Fprintf(w, "event: response.in_progress\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
 	var fullContent string
 	var agenticItems []response.OutputItem // interleaved function_call / function_call_output in arrival order
 	firstTokenSeen := false
+	// Message item scaffolding. itemID is the assistant message's id;
+	// output_index/content_index are always 0 because we emit exactly one
+	// message item with one text content part. Deltas reference these so
+	// the client knows where to append tokens.
+	itemID := "msg_" + correlationID[:min(8, len(correlationID))]
+	textPartDeclared := false
 
 	for {
 		select {
@@ -334,6 +352,45 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 			}
 
 			if token.Done {
+				// Tear down the scaffolding in reverse order before
+				// response.completed: output_text.done, content_part.done,
+				// output_item.done. Clients rely on these to know the
+				// message is finalized. Only emit if we actually declared
+				// the text part (skipped on pure tool_call turns).
+				if textPartDeclared {
+					textDone, _ := json.Marshal(map[string]any{
+						"type":          "response.output_text.done",
+						"item_id":       itemID,
+						"output_index":  0,
+						"content_index": 0,
+						"text":          fullContent,
+					})
+					fmt.Fprintf(w, "event: response.output_text.done\ndata: %s\n\n", textDone)
+					partDone, _ := json.Marshal(map[string]any{
+						"type":          "response.content_part.done",
+						"item_id":       itemID,
+						"output_index":  0,
+						"content_index": 0,
+						"part":          map[string]any{"type": "output_text", "text": fullContent},
+					})
+					fmt.Fprintf(w, "event: response.content_part.done\ndata: %s\n\n", partDone)
+					itemDone, _ := json.Marshal(map[string]any{
+						"type":         "response.output_item.done",
+						"output_index": 0,
+						"item": map[string]any{
+							"type":   "message",
+							"id":     itemID,
+							"status": "completed",
+							"role":   "assistant",
+							"content": []map[string]any{
+								{"type": "output_text", "text": fullContent},
+							},
+						},
+					})
+					fmt.Fprintf(w, "event: response.output_item.done\ndata: %s\n\n", itemDone)
+					flusher.Flush()
+				}
+
 				// Storage keeps the full agentic trace; client-facing SSE
 				// event only includes the final assistant text.
 				var outputItems []response.OutputItem
@@ -386,11 +443,44 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 				return
 			}
 
+			// Declare the message item and text content part on first
+			// token so clients have a structure to append deltas into.
+			// Deferred to first token (rather than subscribe time) so a
+			// turn that ends in a pure tool_call with no text never emits
+			// stale scaffolding.
+			if !textPartDeclared {
+				textPartDeclared = true
+				itemAdded, _ := json.Marshal(map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": 0,
+					"item": map[string]any{
+						"type":    "message",
+						"id":      itemID,
+						"status":  "in_progress",
+						"role":    "assistant",
+						"content": []any{},
+					},
+				})
+				fmt.Fprintf(w, "event: response.output_item.added\ndata: %s\n\n", itemAdded)
+				partAdded, _ := json.Marshal(map[string]any{
+					"type":          "response.content_part.added",
+					"item_id":       itemID,
+					"output_index":  0,
+					"content_index": 0,
+					"part":          map[string]any{"type": "output_text", "text": ""},
+				})
+				fmt.Fprintf(w, "event: response.content_part.added\ndata: %s\n\n", partAdded)
+				flusher.Flush()
+			}
+
 			fullContent += token.Token
 
 			deltaData, _ := json.Marshal(map[string]any{
-				"type":  "response.output_text.delta",
-				"delta": token.Token,
+				"type":          "response.output_text.delta",
+				"item_id":       itemID,
+				"output_index":  0,
+				"content_index": 0,
+				"delta":         token.Token,
 			})
 			fmt.Fprintf(w, "event: response.output_text.delta\ndata: %s\n\n", deltaData)
 			flusher.Flush()
