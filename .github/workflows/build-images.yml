@@ -1,0 +1,87 @@
+name: Build Docker Images
+
+# Triggers on push to main only: verifies the build AND publishes
+# to GitHub Container Registry. PRs do not run this workflow, so
+# broken Dockerfiles are caught at merge time rather than before.
+on:
+  push:
+    branches: [main]
+
+# Cancel in-progress builds when main moves forward rapidly; the older
+# build's publish would just be overwritten.
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - context-manager
+          - exec
+          - gateway
+          - llm-broker
+          - llm-proxy
+          - main-agent
+          - memory-service
+          - retro-agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # QEMU provides arm64 emulation on amd64 runners. Builds are slower
+      # than native but it's the simplest path to multi-arch without
+      # self-hosted runners.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Owner lowercase: ghcr.io requires lowercase repository paths;
+      # GitHub logins are case-preserving and may be mixed-case.
+      - name: Lowercase repository owner
+        id: owner
+        run: echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/microagent2-${{ matrix.service }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.${{ matrix.service }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Per-service GHA cache scope so unrelated services don't
+          # invalidate each other's layers. `mode=max` caches all
+          # intermediate layers, not just the final one — critical for
+          # the exec image whose apt/playwright layers are the long pole.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
