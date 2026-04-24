@@ -48,6 +48,21 @@ open http://localhost:3000
 
 The default compose stack starts: `valkey`, `gateway`, `context-manager`, `hindsight`, `memory-service`, `llm-broker`, `llm-proxy`, `main-agent`, `retro-agent`, `exec`, and `open-webui`. The `mitmweb` service is opt-in under the `debug` profile for traffic inspection.
 
+### Running pre-built images (no local builds)
+
+`docker-compose.ghcr.yml` runs the same stack against the multi-arch images published to GitHub Container Registry on every push to `main`:
+
+```bash
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+Override the registry namespace or pin a specific tag via env:
+
+```bash
+MICROAGENT2_REGISTRY_OWNER=jawillis    # default — change for forks
+MICROAGENT2_TAG=latest                 # override with e.g. sha-abc1234 for reproducible deploys
+```
+
 ## Workflow: OpenSpec-driven changes
 
 This project uses [OpenSpec](https://openspec.dev) for structured change management. Every non-trivial change gets a proposal, a design, a spec delta, and a task list before implementation. Archived changes live under `openspec/changes/archive/` and the canonical contract lives in `openspec/specs/`.
