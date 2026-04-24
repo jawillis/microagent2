@@ -2,6 +2,7 @@ package context
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"microagent2/internal/messaging"
@@ -18,30 +19,35 @@ func NewAssembler(systemPrompt string) *Assembler {
 func (a *Assembler) Assemble(memories []Memory, history []messaging.ChatMsg, userMessage messaging.ChatMsg) []messaging.ChatMsg {
 	var assembled []messaging.ChatMsg
 
-	systemContent := a.systemPrompt
-	if len(memories) > 0 {
-		systemContent += "\n\n" + formatMemories(memories)
-	}
-
 	assembled = append(assembled, messaging.ChatMsg{
 		Role:    "system",
-		Content: systemContent,
+		Content: a.systemPrompt,
 	})
 
 	assembled = append(assembled, history...)
-	assembled = append(assembled, userMessage)
+
+	sorted := make([]Memory, len(memories))
+	copy(sorted, memories)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Score > sorted[j].Score
+	})
+
+	decorated := userMessage
+	decorated.Content = formatContextBlock(sorted) + userMessage.Content
+	assembled = append(assembled, decorated)
 
 	return assembled
 }
 
-func formatMemories(memories []Memory) string {
-	var b strings.Builder
-	b.WriteString("## Relevant Context\n")
-	for i, m := range memories {
-		b.WriteString(fmt.Sprintf("- %s", m.Content))
-		if i < len(memories)-1 {
-			b.WriteString("\n")
-		}
+func formatContextBlock(memories []Memory) string {
+	if len(memories) == 0 {
+		return ""
 	}
+	var b strings.Builder
+	b.WriteString("<context>\n")
+	for _, m := range memories {
+		b.WriteString(fmt.Sprintf("- %s\n", m.Content))
+	}
+	b.WriteString("</context>\n\n")
 	return b.String()
 }
