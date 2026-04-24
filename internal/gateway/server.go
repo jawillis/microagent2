@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jasonwillis/microagent2/internal/messaging"
+	"microagent2/internal/messaging"
 )
 
 type Server struct {

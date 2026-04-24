@@ -1,4 +1,4 @@
-module github.com/jasonwillis/microagent2
+module microagent2
 
 go 1.26.2
 

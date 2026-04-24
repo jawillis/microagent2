@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jasonwillis/microagent2/internal/agent"
-	"github.com/jasonwillis/microagent2/internal/messaging"
-	"github.com/jasonwillis/microagent2/internal/registry"
+	"microagent2/internal/agent"
+	"microagent2/internal/messaging"
+	"microagent2/internal/registry"
 )
 
 func main() {

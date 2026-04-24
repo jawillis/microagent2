@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/jasonwillis/microagent2/internal/messaging"
+	"microagent2/internal/messaging"
 	"github.com/redis/go-redis/v9"
 )
 

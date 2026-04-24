@@ -36,6 +36,7 @@ services:
     environment:
       - VALKEY_ADDR=valkey:6379
       - MUNINNDB_ADDR=${MUNINNDB_ADDR:-host.docker.internal:8100}
+      - MUNINNDB_API_KEY=${MUNINNDB_API_KEY:-}
       - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a helpful assistant.}
     depends_on:
       valkey:
@@ -50,6 +51,7 @@ services:
     environment:
       - VALKEY_ADDR=valkey:6379
       - LLAMA_SERVER_ADDR=${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
+      - LLAMA_API_KEY=${LLAMA_API_KEY:-}
       - SLOT_COUNT=${SLOT_COUNT:-4}
       - PREEMPT_TIMEOUT_MS=${PREEMPT_TIMEOUT_MS:-5000}
     depends_on:
@@ -83,6 +85,7 @@ services:
     environment:
       - VALKEY_ADDR=valkey:6379
       - MUNINNDB_ADDR=${MUNINNDB_ADDR:-host.docker.internal:8100}
+      - MUNINNDB_API_KEY=${MUNINNDB_API_KEY:-}
       - AGENT_ID=retro-agent
       - AGENT_PRIORITY=1
       - AGENT_PREEMPTIBLE=true

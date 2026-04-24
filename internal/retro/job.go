@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/jasonwillis/microagent2/internal/agent"
-	appcontext "github.com/jasonwillis/microagent2/internal/context"
-	"github.com/jasonwillis/microagent2/internal/messaging"
+	"microagent2/internal/agent"
+	appcontext "microagent2/internal/context"
+	"microagent2/internal/messaging"
 )
 
 type JobType string

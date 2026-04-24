@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jasonwillis/microagent2/internal/messaging"
+	"microagent2/internal/messaging"
 )
 
 type AgentInfo struct {

@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jasonwillis/microagent2/internal/agent"
-	"github.com/jasonwillis/microagent2/internal/broker"
-	appcontext "github.com/jasonwillis/microagent2/internal/context"
-	"github.com/jasonwillis/microagent2/internal/gateway"
-	"github.com/jasonwillis/microagent2/internal/messaging"
-	"github.com/jasonwillis/microagent2/internal/registry"
-	"github.com/jasonwillis/microagent2/internal/retro"
+	"microagent2/internal/agent"
+	"microagent2/internal/broker"
+	appcontext "microagent2/internal/context"
+	"microagent2/internal/gateway"
+	"microagent2/internal/messaging"
+	"microagent2/internal/registry"
+	"microagent2/internal/retro"
 )
 
 var testLogger = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -45,10 +45,10 @@ func TestEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Start a mock llama-server that returns a fixed completion
+	// Start a mock llama-server that returns an OpenAI-format completion
 	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprint(w, `{"content":"Hello from llama","stop":true}`)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from llama"},"finish_reason":"stop"}]}`)
 	}))
 	defer llamaServer.Close()
 	llamaAddr := strings.TrimPrefix(llamaServer.URL, "http://")
@@ -63,12 +63,12 @@ func TestEndToEnd(t *testing.T) {
 
 	// Set up broker
 	reg := registry.NewRegistry()
-	b := broker.New(client, reg, testLogger, llamaAddr, 4, 5*time.Second)
+	b := broker.New(client, reg, testLogger, llamaAddr, "", 4, 5*time.Second)
 	go b.Run(ctx)
 
 	// Set up context manager
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr)
+	muninn := appcontext.NewMuninnClient(muninnAddr, "")
 	assembler := appcontext.NewAssembler("You are a test assistant.")
 	mgr := appcontext.NewManager(client, sessions, muninn, assembler, testLogger)
 	go mgr.Run(ctx)
@@ -245,7 +245,7 @@ func TestPreemptionFlow(t *testing.T) {
 	}))
 	defer llamaServer.Close()
 
-	b := broker.New(client, reg, testLogger, strings.TrimPrefix(llamaServer.URL, "http://"), 2, 2*time.Second)
+	b := broker.New(client, reg, testLogger, strings.TrimPrefix(llamaServer.URL, "http://"), "", 2, 2*time.Second)
 	go b.Run(ctx)
 
 	time.Sleep(300 * time.Millisecond)
@@ -376,8 +376,8 @@ func TestMemoryInjection(t *testing.T) {
 	// Mock MuninnDB that returns stored memories
 	muninnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/recall" {
-			fmt.Fprint(w, `[{"content":"User prefers dark mode","category":"preference","score":0.92}]`)
+		if r.URL.Path == "/api/activate" {
+			fmt.Fprint(w, `{"activations":[{"content":"User prefers dark mode","concept":"preference","score":0.92,"summary":"recalled from preference"}]}`)
 		} else {
 			fmt.Fprint(w, `{"status":"ok"}`)
 		}
@@ -386,7 +386,7 @@ func TestMemoryInjection(t *testing.T) {
 	muninnAddr := strings.TrimPrefix(muninnServer.URL, "http://")
 
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr)
+	muninn := appcontext.NewMuninnClient(muninnAddr, "")
 	assembler := appcontext.NewAssembler("You are a test assistant.")
 
 	// Store session history

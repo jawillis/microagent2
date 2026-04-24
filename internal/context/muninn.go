@@ -1,41 +1,77 @@
 package context
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 type Memory struct {
 	Content  string  `json:"content"`
+	Concept  string  `json:"concept"`
 	Category string  `json:"category"`
 	Score    float64 `json:"score"`
+	Why      string  `json:"why"`
 }
 
 type MuninnClient struct {
 	addr       string
+	apiKey     string
 	httpClient *http.Client
 }
 
-func NewMuninnClient(addr string) *MuninnClient {
+func NewMuninnClient(addr, apiKey string) *MuninnClient {
 	return &MuninnClient{
 		addr:       addr,
+		apiKey:     apiKey,
 		httpClient: &http.Client{},
 	}
 }
 
-func (m *MuninnClient) Recall(ctx context.Context, query string, limit int) ([]Memory, error) {
-	url := fmt.Sprintf("http://%s/recall", m.addr)
-	body := fmt.Sprintf(`{"query":%q,"limit":%d}`, query, limit)
+type activateRequest struct {
+	Vault      string   `json:"vault"`
+	Context    []string `json:"context"`
+	MaxResults int      `json:"max_results"`
+	Threshold  float64  `json:"threshold"`
+	MaxHops    int      `json:"max_hops"`
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+type activateResponse struct {
+	Activations []activateResponseItem `json:"activations"`
+}
+
+type activateResponseItem struct {
+	Score   float64 `json:"score"`
+	Concept string  `json:"concept"`
+	Content string  `json:"content"`
+	Summary string  `json:"summary"`
+}
+
+func (m *MuninnClient) Recall(ctx context.Context, query string, limit int) ([]Memory, error) {
+	url := fmt.Sprintf("http://%s/api/activate", m.addr)
+
+	body, err := json.Marshal(activateRequest{
+		Vault:      "default",
+		Context:    []string{query},
+		MaxResults: limit,
+		Threshold:  0.5,
+		MaxHops:    2,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if m.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.apiKey)
+	}
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
@@ -48,31 +84,54 @@ func (m *MuninnClient) Recall(ctx context.Context, query string, limit int) ([]M
 		return nil, fmt.Errorf("muninndb returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var memories []Memory
-	if err := json.NewDecoder(resp.Body).Decode(&memories); err != nil {
+	var result activateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
+	}
+
+	memories := make([]Memory, len(result.Activations))
+	for i, item := range result.Activations {
+		memories[i] = Memory{
+			Content:  item.Content,
+			Concept:  item.Concept,
+			Category: item.Concept,
+			Score:    item.Score,
+			Why:      item.Summary,
+		}
 	}
 	return memories, nil
 }
 
-func (m *MuninnClient) Store(ctx context.Context, content, category string, keyTerms []string) error {
-	url := fmt.Sprintf("http://%s/store", m.addr)
+type engramRequest struct {
+	Vault      string   `json:"vault"`
+	Concept    string   `json:"concept"`
+	Content    string   `json:"content"`
+	Tags       []string `json:"tags"`
+	Confidence float64  `json:"confidence"`
+}
 
-	payload := map[string]any{
-		"content":   content,
-		"category":  category,
-		"key_terms": keyTerms,
-	}
-	data, err := json.Marshal(payload)
+func (m *MuninnClient) Store(ctx context.Context, content, category string, keyTerms []string) error {
+	url := fmt.Sprintf("http://%s/api/engrams", m.addr)
+
+	body, err := json.Marshal(engramRequest{
+		Vault:      "default",
+		Concept:    category,
+		Content:    content,
+		Tags:       keyTerms,
+		Confidence: 0.9,
+	})
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(data)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if m.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.apiKey)
+	}
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {

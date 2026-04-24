@@ -8,8 +8,8 @@ import (
 
 	gocontext "context"
 
-	appcontext "github.com/jasonwillis/microagent2/internal/context"
-	"github.com/jasonwillis/microagent2/internal/messaging"
+	appcontext "microagent2/internal/context"
+	"microagent2/internal/messaging"
 )
 
 func main() {
@@ -17,6 +17,7 @@ func main() {
 
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
 	muninnAddr := envOr("MUNINNDB_ADDR", "localhost:8100")
+	muninnAPIKey := envOr("MUNINNDB_API_KEY", "")
 	systemPrompt := envOr("SYSTEM_PROMPT", "You are a helpful assistant.")
 
 	client := messaging.NewClient(valkeyAddr)
@@ -31,7 +32,7 @@ func main() {
 	}
 
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr)
+	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey)
 	assembler := appcontext.NewAssembler(systemPrompt)
 	mgr := appcontext.NewManager(client, sessions, muninn, assembler, logger)
 

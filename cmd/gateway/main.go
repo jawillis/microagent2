@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jasonwillis/microagent2/internal/gateway"
-	"github.com/jasonwillis/microagent2/internal/messaging"
+	"microagent2/internal/gateway"
+	"microagent2/internal/messaging"
 )
 
 func main() {

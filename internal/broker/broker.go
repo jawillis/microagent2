@@ -1,7 +1,10 @@
 package broker
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jasonwillis/microagent2/internal/messaging"
-	"github.com/jasonwillis/microagent2/internal/registry"
+	"microagent2/internal/messaging"
+	"microagent2/internal/registry"
 )
 
 type Broker struct {
@@ -21,6 +24,7 @@ type Broker struct {
 	regConsumer    *registry.RegistryConsumer
 	logger         *slog.Logger
 	llamaAddr      string
+	llamaAPIKey    string
 	preemptTimeout time.Duration
 
 	mu             sync.Mutex
@@ -34,13 +38,14 @@ type slotRequest struct {
 	replyStream   string
 }
 
-func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr string, slotCount int, preemptTimeout time.Duration) *Broker {
+func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr, llamaAPIKey string, slotCount int, preemptTimeout time.Duration) *Broker {
 	b := &Broker{
 		client:         client,
 		slots:          NewSlotTable(slotCount),
 		registry:       reg,
 		logger:         logger,
 		llamaAddr:      llamaAddr,
+		llamaAPIKey:    llamaAPIKey,
 		preemptTimeout: preemptTimeout,
 	}
 
@@ -290,6 +295,28 @@ func (b *Broker) IsPreemptible(agentID string) bool {
 	return ok && info.Preemptible
 }
 
+type chatCompletionRequest struct {
+	Model    string             `json:"model"`
+	Messages []messaging.ChatMsg `json:"messages"`
+	Stream   bool               `json:"stream"`
+}
+
+type chatCompletionResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+type chatCompletionChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
+}
+
 func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []messaging.ChatMsg, stream bool) (<-chan string, <-chan error) {
 	tokenCh := make(chan string, 100)
 	errCh := make(chan error, 1)
@@ -298,18 +325,27 @@ func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []mes
 		defer close(tokenCh)
 		defer close(errCh)
 
-		url := fmt.Sprintf("http://%s/completion", b.llamaAddr)
+		url := fmt.Sprintf("http://%s/v1/chat/completions", b.llamaAddr)
 
-		prompt := buildPrompt(messages)
+		reqBody, err := json.Marshal(chatCompletionRequest{
+			Model:    "default",
+			Messages: messages,
+			Stream:   stream,
+		})
+		if err != nil {
+			errCh <- err
+			return
+		}
 
-		body := fmt.Sprintf(`{"prompt":%q,"id_slot":%d,"stream":%t}`, prompt, slotID, stream)
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 		if err != nil {
 			errCh <- err
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if b.llamaAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+b.llamaAPIKey)
+		}
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -320,41 +356,51 @@ func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []mes
 
 		if resp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(resp.Body)
-			errCh <- fmt.Errorf("llama-server returned %d: %s", resp.StatusCode, string(respBody))
+			errCh <- fmt.Errorf("llm server returned %d: %s", resp.StatusCode, string(respBody))
 			return
 		}
 
-		buf := make([]byte, 4096)
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				tokenCh <- string(buf[:n])
-			}
-			if err != nil {
-				if err != io.EOF {
-					errCh <- err
-				}
-				return
-			}
+		if stream {
+			b.readSSEStream(resp.Body, tokenCh, errCh)
+		} else {
+			b.readFullResponse(resp.Body, tokenCh, errCh)
 		}
 	}()
 
 	return tokenCh, errCh
 }
 
-func buildPrompt(messages []messaging.ChatMsg) string {
-	var prompt string
-	for _, m := range messages {
-		switch m.Role {
-		case "system":
-			prompt += m.Content + "\n"
-		case "user":
-			prompt += "User: " + m.Content + "\n"
-		case "assistant":
-			prompt += "Assistant: " + m.Content + "\n"
-		}
+func (b *Broker) readFullResponse(body io.Reader, tokenCh chan<- string, errCh chan<- error) {
+	var resp chatCompletionResponse
+	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+		errCh <- fmt.Errorf("decode response: %w", err)
+		return
 	}
-	prompt += "Assistant: "
-	return prompt
+	if len(resp.Choices) > 0 {
+		tokenCh <- resp.Choices[0].Message.Content
+	}
 }
 
+func (b *Broker) readSSEStream(body io.Reader, tokenCh chan<- string, errCh chan<- error) {
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			return
+		}
+		var chunk chatCompletionChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			tokenCh <- chunk.Choices[0].Delta.Content
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		errCh <- err
+	}
+}

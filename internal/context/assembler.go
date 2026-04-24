@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jasonwillis/microagent2/internal/messaging"
+	"microagent2/internal/messaging"
 )
 
 type Assembler struct {

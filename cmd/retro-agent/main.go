@@ -10,11 +10,11 @@ import (
 
 	gocontext "context"
 
-	"github.com/jasonwillis/microagent2/internal/agent"
-	appcontext "github.com/jasonwillis/microagent2/internal/context"
-	"github.com/jasonwillis/microagent2/internal/messaging"
-	"github.com/jasonwillis/microagent2/internal/registry"
-	"github.com/jasonwillis/microagent2/internal/retro"
+	"microagent2/internal/agent"
+	appcontext "microagent2/internal/context"
+	"microagent2/internal/messaging"
+	"microagent2/internal/registry"
+	"microagent2/internal/retro"
 )
 
 func main() {
@@ -22,6 +22,7 @@ func main() {
 
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
 	muninnAddr := envOr("MUNINNDB_ADDR", "localhost:8100")
+	muninnAPIKey := envOr("MUNINNDB_API_KEY", "")
 	agentID := envOr("AGENT_ID", "retro-agent")
 	priority := envInt("AGENT_PRIORITY", 1)
 	heartbeatMS := envInt("HEARTBEAT_INTERVAL_MS", 3000)
@@ -57,7 +58,7 @@ func main() {
 
 	rt := agent.NewRuntime(client, agentID, priority, true, logger)
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr)
+	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey)
 	checkpoints := retro.NewCheckpointStore(client.Redis())
 
 	memJob := retro.NewMemoryExtractionJob(rt, sessions, muninn, logger, checkpoints)

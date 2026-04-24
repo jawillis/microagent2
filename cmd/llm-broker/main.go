@@ -10,9 +10,9 @@ import (
 
 	gocontext "context"
 
-	"github.com/jasonwillis/microagent2/internal/broker"
-	"github.com/jasonwillis/microagent2/internal/messaging"
-	"github.com/jasonwillis/microagent2/internal/registry"
+	"microagent2/internal/broker"
+	"microagent2/internal/messaging"
+	"microagent2/internal/registry"
 )
 
 func main() {
@@ -20,6 +20,7 @@ func main() {
 
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
 	llamaAddr := envOr("LLAMA_SERVER_ADDR", "localhost:8081")
+	llamaAPIKey := envOr("LLAMA_API_KEY", "")
 	slotCount := envInt("SLOT_COUNT", 4)
 	preemptTimeoutMS := envInt("PREEMPT_TIMEOUT_MS", 5000)
 
@@ -36,7 +37,7 @@ func main() {
 
 	reg := registry.NewRegistry()
 	preemptTimeout := time.Duration(preemptTimeoutMS) * time.Millisecond
-	b := broker.New(client, reg, logger, llamaAddr, slotCount, preemptTimeout)
+	b := broker.New(client, reg, logger, llamaAddr, llamaAPIKey, slotCount, preemptTimeout)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
