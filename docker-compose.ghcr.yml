@@ -1,0 +1,265 @@
+# docker-compose.ghcr.yml
+#
+# Runs the microagent2 stack against pre-built multi-arch images from
+# GitHub Container Registry — no local builds. The images are published
+# on every push to `main` by .github/workflows/build-images.yml.
+#
+# Usage:
+#   docker compose -f docker-compose.ghcr.yml up -d
+#
+# Override registry owner or image tag via env:
+#   MICROAGENT2_REGISTRY_OWNER=jawillis   (default; change for forks)
+#   MICROAGENT2_TAG=latest                (default; override with a short
+#                                          SHA like `sha-abc1234` for
+#                                          reproducible deployments)
+#
+# All other configuration (env vars, volumes, ports, dependencies) matches
+# docker-compose.yml. Only the `build:` blocks have been swapped for
+# `image:` references.
+
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "${VALKEY_PORT:-6379}:6379"
+    volumes:
+      - valkey-data:/data
+    command: valkey-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - microagent
+
+  gateway:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-gateway:${MICROAGENT2_TAG:-latest}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - GATEWAY_PORT=8080
+      - LLAMA_ADDR=http://${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
+      - MEMORY_SERVICE_ADDR=http://memory-service:8083
+      - SESSION_HASH_TTL_HOURS=${SESSION_HASH_TTL_HOURS:-24}
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - microagent
+
+  context-manager:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-context-manager:${MICROAGENT2_TAG:-latest}
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - MEMORY_SERVICE_ADDR=http://memory-service:8083
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-You are a helpful assistant.}
+    depends_on:
+      valkey:
+        condition: service_healthy
+      memory-service:
+        condition: service_started
+    networks:
+      - microagent
+
+  hindsight:
+    # The Hindsight image is operator-provided. Set HINDSIGHT_IMAGE in .env
+    # to the container image you want to run (see
+    # https://github.com/vectorize-io/hindsight).
+    image: ${HINDSIGHT_IMAGE}
+    environment:
+      - HINDSIGHT_API_LLM_PROVIDER=openai
+      - HINDSIGHT_API_LLM_API_KEY=${HINDSIGHT_LLM_API_KEY:-sk-local}
+      - HINDSIGHT_API_LLM_BASE_URL=http://llm-proxy:8082/v1
+      - HINDSIGHT_API_LLM_MODEL=${HINDSIGHT_LLM_MODEL:-unsloth}
+      - HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
+    user: "1000:1000"
+    ports:
+      - "${HINDSIGHT_CP_PORT:-9999}:9999"
+      - "${HINDSIGHT_API_PORT:-8888}:8888"
+    volumes:
+      - hindsight-data:/home/hindsight/.pg0
+    mem_limit: ${HINDSIGHT_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    depends_on:
+      llm-proxy:
+        condition: service_started
+    networks:
+      - microagent
+
+  memory-service:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-memory-service:${MICROAGENT2_TAG:-latest}
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - HINDSIGHT_ADDR=http://hindsight:8888
+      - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY:-}
+      - HINDSIGHT_WEBHOOK_SECRET=${HINDSIGHT_WEBHOOK_SECRET:?HINDSIGHT_WEBHOOK_SECRET must be set}
+      - MEMORY_BANK_ID=${MEMORY_BANK_ID:-microagent2}
+      - MEMORY_SERVICE_HTTP_ADDR=:8083
+      - MEMORY_SERVICE_EXTERNAL_URL=http://memory-service:8083
+      - MEMORY_SERVICE_CP_URL=${MEMORY_SERVICE_CP_URL:-http://localhost:${HINDSIGHT_CP_PORT:-9999}}
+      - MEMORY_YAML_DIR=/etc/microagent2/memory
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
+    depends_on:
+      hindsight:
+        condition: service_started
+      valkey:
+        condition: service_healthy
+    networks:
+      - microagent
+
+  llm-broker:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-llm-broker:${MICROAGENT2_TAG:-latest}
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - LLAMA_SERVER_ADDR=${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
+      - LLAMA_API_KEY=${LLAMA_API_KEY:-}
+      - SLOT_COUNT=${SLOT_COUNT:-6}
+      - AGENT_SLOT_COUNT=${AGENT_SLOT_COUNT:-4}
+      - HINDSIGHT_SLOT_COUNT=${HINDSIGHT_SLOT_COUNT:-2}
+      - PREEMPT_TIMEOUT_MS=${PREEMPT_TIMEOUT_MS:-5000}
+      - PROVISIONAL_TIMEOUT_MS=${PROVISIONAL_TIMEOUT_MS:-2000}
+      - SLOT_SNAPSHOT_INTERVAL_S=${SLOT_SNAPSHOT_INTERVAL_S:-30}
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - microagent
+
+  llm-proxy:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-llm-proxy:${MICROAGENT2_TAG:-latest}
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - LLM_PROXY_HTTP_ADDR=:8082
+      - LLM_PROXY_IDENTITY=${LLM_PROXY_IDENTITY:-llm-proxy}
+      - LLM_PROXY_SLOT_TIMEOUT_MS=${LLM_PROXY_SLOT_TIMEOUT_MS:-10000}
+      - LLM_PROXY_REQUEST_TIMEOUT_MS=${LLM_PROXY_REQUEST_TIMEOUT_MS:-300000}
+    depends_on:
+      valkey:
+        condition: service_healthy
+      llm-broker:
+        condition: service_started
+    networks:
+      - microagent
+
+  main-agent:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-main-agent:${MICROAGENT2_TAG:-latest}
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - AGENT_ID=main-agent
+      - AGENT_PRIORITY=0
+      - AGENT_PREEMPTIBLE=false
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
+      - SKILLS_DIR=/app/skills
+      - TOOL_LOOP_MAX_ITER=${TOOL_LOOP_MAX_ITER:-10}
+      - EXEC_ADDR=http://exec:8085
+      - EXEC_MAX_TIMEOUT_S=${EXEC_MAX_TIMEOUT_S:-120}
+    volumes:
+      - ./skills:/app/skills:ro
+    depends_on:
+      valkey:
+        condition: service_healthy
+      llm-broker:
+        condition: service_started
+      exec:
+        condition: service_started
+    networks:
+      - microagent
+
+  retro-agent:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-retro-agent:${MICROAGENT2_TAG:-latest}
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - MEMORY_SERVICE_ADDR=http://memory-service:8083
+      - AGENT_ID=retro-agent
+      - AGENT_PRIORITY=1
+      - AGENT_PREEMPTIBLE=true
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
+      - INACTIVITY_TIMEOUT_S=${INACTIVITY_TIMEOUT_S:-300}
+    depends_on:
+      valkey:
+        condition: service_healthy
+      llm-broker:
+        condition: service_started
+      memory-service:
+        condition: service_started
+    networks:
+      - microagent
+
+  exec:
+    image: ghcr.io/${MICROAGENT2_REGISTRY_OWNER:-jawillis}/microagent2-exec:${MICROAGENT2_TAG:-latest}
+    environment:
+      - EXEC_PORT=8085
+      - EXEC_MAX_TIMEOUT_S=${EXEC_MAX_TIMEOUT_S:-120}
+      - EXEC_STDOUT_CAP_BYTES=${EXEC_STDOUT_CAP_BYTES:-16384}
+      - EXEC_STDERR_CAP_BYTES=${EXEC_STDERR_CAP_BYTES:-8192}
+      - EXEC_WORKSPACE_RETENTION_MINUTES=${EXEC_WORKSPACE_RETENTION_MINUTES:-60}
+      - EXEC_GC_INTERVAL_MINUTES=${EXEC_GC_INTERVAL_MINUTES:-5}
+      - EXEC_PREWARM_CONCURRENCY=${EXEC_PREWARM_CONCURRENCY:-4}
+      - EXEC_INSTALL_TIMEOUT_S=${EXEC_INSTALL_TIMEOUT_S:-600}
+      - EXEC_NETWORK_DEFAULT=${EXEC_NETWORK_DEFAULT:-allow}
+      - EXEC_NETWORK_DENY_SKILLS=${EXEC_NETWORK_DENY_SKILLS:-}
+      - EXEC_SANDBOX_RETENTION_MINUTES=${EXEC_SANDBOX_RETENTION_MINUTES:-60}
+      - EXEC_SANDBOX_GC_INTERVAL_MINUTES=${EXEC_SANDBOX_GC_INTERVAL_MINUTES:-5}
+      - SKILLS_DIR=/skills
+      - CACHE_DIR=/cache
+      - WORKSPACE_DIR=/workspace
+      - SANDBOX_DIR=/sandbox
+      - PYTHON_VERSION=3.12
+    volumes:
+      - ./skills:/skills:ro
+      - exec-cache:/cache
+    tmpfs:
+      - /workspace:size=64m,mode=1777
+      - /sandbox:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    networks:
+      - microagent
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "${OPEN_WEBUI_PORT:-3000}:8080"
+    environment:
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-http://gateway:8080/v1}
+      - OPENAI_API_KEY=none
+      - USE_OLLAMA_DOCKER=false
+      - ANONYMIZED_TELEMETRY=false
+      - DO_NOT_TRACK=true
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - gateway
+    networks:
+      - microagent
+
+  # mitmweb is opt-in. It's useful for inspecting gateway SSE traffic but
+  # buffers response bodies by default, which breaks token-by-token streaming
+  # to the UI. Not started by `docker compose up`. To enable for debugging:
+  #   docker compose -f docker-compose.ghcr.yml --profile debug up -d mitmweb
+  # Point open-webui at it via OPENAI_API_BASE_URL=http://mitmweb:8080/v1 in
+  # .env, then recreate open-webui. The --set stream_large_bodies=1 flag
+  # forces streaming so SSE flows through.
+  mitmweb:
+    image: mitmproxy/mitmproxy
+    container_name: mitmweb
+    restart: unless-stopped
+    profiles: ["debug"]
+    ports:
+      - "8082:8080"
+      - "8083:8081"
+    command: mitmweb --web-host 0.0.0.0 --set web_password=${MITMWEB_PASSWORD:-nerdtastic} --set stream_large_bodies=1 --mode reverse:http://gateway:8080
+    networks:
+      - microagent
+
+networks:
+  microagent:
+    driver: bridge
+
+volumes:
+  valkey-data:
+  open-webui-data:
+  hindsight-data:
+  exec-cache:
