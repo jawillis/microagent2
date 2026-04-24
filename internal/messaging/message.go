@@ -29,6 +29,8 @@ const (
 	TypeSessionEvent    MessageType = "session_event"
 	TypeContextAssembled MessageType = "context_assembled"
 	TypeRetroTrigger     MessageType = "retro_trigger"
+	TypeSlotSnapshotRequest  MessageType = "slot_snapshot_request"
+	TypeSlotSnapshotResponse MessageType = "slot_snapshot_response"
 )
 
 type Message struct {

@@ -31,6 +31,7 @@ const (
 	KindIframe SectionKind = "iframe"
 	KindStatus SectionKind = "status"
 	KindLogs   SectionKind = "logs"
+	KindAction SectionKind = "action"
 )
 
 // FieldType enumerates the closed set of form-field types supported by
@@ -72,6 +73,7 @@ type Section struct {
 	Iframe *IframeSection
 	Status *StatusSection
 	Logs   *LogsSection
+	Action *ActionSection
 }
 
 // FormSection declares a config form backed by the gateway's existing
@@ -96,6 +98,44 @@ type StatusSection struct {
 	Title  string       `json:"title"`
 	URL    string       `json:"url"`
 	Layout StatusLayout `json:"layout"`
+}
+
+// ActionSection declares one or more buttons that issue HTTP requests
+// on click. Intended for one-shot RPCs (trigger retro job, MCP add/
+// remove, etc.) that don't fit the form or status idioms.
+type ActionSection struct {
+	Title   string   `json:"title"`
+	Actions []Action `json:"actions"`
+}
+
+// Action describes a single button. `url` may contain `{param}`
+// placeholders that are substituted from the rendered parameter inputs.
+// `body` is the static request body; `params` produces additional fields
+// merged into it. `confirm` shows a confirmation dialog before firing.
+// `status_key` tells the dashboard which field from the response to
+// display as success text.
+type Action struct {
+	Label     string         `json:"label"`
+	URL       string         `json:"url"`
+	Method    string         `json:"method,omitempty"` // POST | PUT | DELETE; default POST
+	Body      map[string]any `json:"body,omitempty"`
+	Params    []ActionParam  `json:"params,omitempty"`
+	Confirm   string         `json:"confirm,omitempty"`
+	StatusKey string         `json:"status_key,omitempty"`
+}
+
+// ActionParam is one user-input field rendered alongside an action
+// button. Supports the same type vocabulary as FieldSchema but with a
+// narrower shape (required + default only).
+type ActionParam struct {
+	Name        string    `json:"name"`
+	Type        FieldType `json:"type"`
+	Required    bool      `json:"required,omitempty"`
+	Label       string    `json:"label,omitempty"`
+	Description string    `json:"description,omitempty"`
+	Default     any       `json:"default,omitempty"`
+	// Values carries enum options when Type == FieldEnum.
+	Values []string `json:"values,omitempty"`
 }
 
 // LogsSection declares a live-tailing log viewer. The dashboard opens
@@ -180,10 +220,64 @@ func validateSection(s Section) error {
 			return fmt.Errorf("kind=logs requires logs body")
 		}
 		return validateLogs(s.Logs)
+	case KindAction:
+		if s.Action == nil {
+			return fmt.Errorf("kind=action requires action body")
+		}
+		return validateAction(s.Action)
 	case "":
 		return fmt.Errorf("section kind is required")
 	default:
 		return fmt.Errorf("unknown section kind %q", s.Kind)
+	}
+}
+
+func validateAction(a *ActionSection) error {
+	if a.Title == "" {
+		return fmt.Errorf("action.title is required")
+	}
+	if len(a.Actions) == 0 {
+		return fmt.Errorf("action.actions must have at least one entry")
+	}
+	for i, act := range a.Actions {
+		if act.Label == "" {
+			return fmt.Errorf("action.actions[%d].label is required", i)
+		}
+		if act.URL == "" {
+			return fmt.Errorf("action.actions[%d].url is required", i)
+		}
+		if act.Method != "" {
+			switch strings.ToUpper(act.Method) {
+			case "POST", "PUT", "DELETE":
+			default:
+				return fmt.Errorf("action.actions[%d].method must be POST|PUT|DELETE; got %q", i, act.Method)
+			}
+		}
+		for j, p := range act.Params {
+			if p.Name == "" {
+				return fmt.Errorf("action.actions[%d].params[%d].name is required", i, j)
+			}
+			if err := validateActionParamType(p); err != nil {
+				return fmt.Errorf("action.actions[%d].params[%d]: %w", i, j, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateActionParamType(p ActionParam) error {
+	switch p.Type {
+	case FieldString, FieldNumber, FieldInteger, FieldBoolean, FieldTextarea:
+		return nil
+	case FieldEnum:
+		if len(p.Values) == 0 {
+			return fmt.Errorf("enum param requires non-empty values")
+		}
+		return nil
+	case "":
+		return fmt.Errorf("param type is required")
+	default:
+		return fmt.Errorf("unknown param type %q", p.Type)
 	}
 }
 
@@ -335,6 +429,14 @@ func (s Section) MarshalJSON() ([]byte, error) {
 			Kind SectionKind `json:"kind"`
 			*LogsSection
 		}{Kind: s.Kind, LogsSection: s.Logs})
+	case KindAction:
+		if s.Action == nil {
+			return nil, fmt.Errorf("section kind=action with nil body")
+		}
+		return json.Marshal(struct {
+			Kind SectionKind `json:"kind"`
+			*ActionSection
+		}{Kind: s.Kind, ActionSection: s.Action})
 	default:
 		return nil, fmt.Errorf("unknown section kind %q", s.Kind)
 	}
@@ -371,6 +473,12 @@ func (s *Section) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		s.Logs = &body
+	case KindAction:
+		var body ActionSection
+		if err := json.Unmarshal(data, &body); err != nil {
+			return err
+		}
+		s.Action = &body
 	case "":
 		return fmt.Errorf("section missing kind")
 	default:

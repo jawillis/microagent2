@@ -18,4 +18,7 @@ const (
 
 	StreamRetroTriggers = "stream:retro:triggers"
 	ConsumerGroupRetro  = "cg:retro"
+
+	StreamBrokerSlotSnapshot    = "stream:broker:slot-snapshot-requests"
+	ConsumerGroupBrokerSnapshot = "cg:broker:snapshot"
 )

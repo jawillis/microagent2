@@ -67,6 +67,7 @@ func main() {
 		Capabilities:        []string{"chat"},
 		Trigger:             "request-driven",
 		HeartbeatIntervalMS: heartbeatMS,
+		DashboardPanel:      agent.BuildMCPPanelDescriptor(),
 	})
 
 	if err := reg.Register(ctx); err != nil {

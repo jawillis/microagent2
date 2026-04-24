@@ -57,11 +57,28 @@ func main() {
 	}
 	b := broker.NewWithClasses(client, reg, logger, llamaAddr, llamaAPIKey, chatCfg.Model, agentSlotCount, hindsightSlotCount, preemptTimeout, provisionalTimeout, snapshotInterval)
 
+	// Self-registration + heartbeat for the dashboard panel.
+	heartbeatMS := envInt("HEARTBEAT_INTERVAL_MS", 3000)
+	selfReg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{
+		AgentID:             "llm-broker",
+		Priority:            0,
+		Preemptible:         false,
+		Capabilities:        []string{"llm-broker"},
+		Trigger:             "messaging",
+		HeartbeatIntervalMS: heartbeatMS,
+		DashboardPanel:      broker.BuildPanelDescriptor(),
+	})
+	if err := selfReg.Register(ctx); err != nil {
+		logger.Error("failed_to_register", "error", err.Error())
+	}
+	go selfReg.RunHeartbeat(ctx)
+
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info("shutting down broker")
+		_ = selfReg.Deregister(gocontext.Background())
 		cancel()
 	}()
 

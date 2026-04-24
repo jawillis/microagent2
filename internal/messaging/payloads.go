@@ -140,3 +140,26 @@ type RetroTriggerPayload struct {
 	SessionID string `json:"session_id"`
 	JobType   string `json:"job_type"`
 }
+
+// SlotSnapshotRequestPayload is sent by the gateway and consumed by the
+// broker; the broker replies on the request's reply stream.
+type SlotSnapshotRequestPayload struct{}
+
+// SlotSnapshotResponsePayload carries the broker's current slot-table
+// snapshot. Entries are the same shape the broker emits in its periodic
+// log: {slot, class, state, agent, priority, age_s}.
+type SlotSnapshotResponsePayload struct {
+	Slots []SlotSnapshotEntry `json:"slots"`
+}
+
+// SlotSnapshotEntry mirrors internal/broker.SlotSnapshotEntry but lives
+// in the messaging package so gateway and broker can share the shape
+// without importing each other.
+type SlotSnapshotEntry struct {
+	SlotID   int     `json:"slot"`
+	Class    string  `json:"class"`
+	State    string  `json:"state"`
+	AgentID  string  `json:"agent,omitempty"`
+	Priority int     `json:"priority"`
+	AgeS     float64 `json:"age_s"`
+}

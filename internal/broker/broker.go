@@ -76,8 +76,47 @@ func (b *Broker) Run(ctx context.Context) error {
 	go b.regConsumer.RunRegistrationConsumer(ctx)
 	go b.regConsumer.RunHeartbeatMonitor(ctx)
 	go b.consumeLLMRequests(ctx)
+	go b.consumeSnapshotRequests(ctx)
 	go b.runSnapshotLogger(ctx)
 	return b.consumeSlotRequests(ctx)
+}
+
+// consumeSnapshotRequests serves on-demand slot snapshots requested
+// via messaging (e.g. by the gateway's /v1/broker/slots endpoint).
+// Each request's reply stream receives a SlotSnapshotResponse payload.
+func (b *Broker) consumeSnapshotRequests(ctx context.Context) {
+	group := messaging.ConsumerGroupBrokerSnapshot
+	consumer := "slot-snapshot"
+	err := b.client.ConsumeStream(ctx, messaging.StreamBrokerSlotSnapshot, group, consumer, 10, 2*time.Second,
+		func(ctx context.Context, msg *messaging.Message) error {
+			if msg.Type != messaging.TypeSlotSnapshotRequest {
+				return nil
+			}
+			snap := b.slots.Snapshot()
+			entries := make([]messaging.SlotSnapshotEntry, len(snap))
+			for i, s := range snap {
+				entries[i] = messaging.SlotSnapshotEntry{
+					SlotID:   s.SlotID,
+					Class:    s.Class,
+					State:    s.State,
+					AgentID:  s.AgentID,
+					Priority: s.Priority,
+					AgeS:     s.AgeS,
+				}
+			}
+			reply, rerr := messaging.NewReply(msg, messaging.TypeSlotSnapshotResponse, "llm-broker",
+				messaging.SlotSnapshotResponsePayload{Slots: entries})
+			if rerr != nil {
+				return nil
+			}
+			if msg.ReplyStream != "" {
+				_, _ = b.client.Publish(ctx, msg.ReplyStream, reply)
+			}
+			return nil
+		}, b.logger, nil)
+	if err != nil && err != context.Canceled {
+		b.logger.Error("slot_snapshot_consumer_exit", "error", err.Error())
+	}
 }
 
 func (b *Broker) runSnapshotLogger(ctx context.Context) {

@@ -91,3 +91,12 @@ dl.kv{margin:0.5rem 0}
 .logs-cid{color:var(--text-muted);width:70px}
 .logs-msg{overflow:hidden;text-overflow:ellipsis;color:var(--text)}
 .logs-raw{grid-column:1/-1;background:var(--surface2);padding:0.4rem;margin-top:0.3rem;border-radius:var(--radius);white-space:pre-wrap;word-break:break-word;font-size:0.75rem;max-height:300px;overflow:auto}
+
+/* Action section */
+.section-action .action-row{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:flex-end;padding:0.5rem;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:0.5rem;background:var(--surface2)}
+.action-param{display:flex;flex-direction:column;gap:0.2rem;min-width:160px}
+.action-btn{align-self:center;background:var(--accent);color:white;border:none;padding:0.4rem 0.8rem;border-radius:var(--radius);cursor:pointer;font-size:0.9rem}
+.action-btn:hover{opacity:0.9}
+.action-status{font-size:0.85rem;align-self:center;padding:0 0.5rem}
+.action-status.ok{color:var(--ok)}
+.action-status.err{color:var(--err)}

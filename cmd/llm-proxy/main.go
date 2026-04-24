@@ -13,6 +13,7 @@ import (
 	"microagent2/internal/llmproxy"
 	"microagent2/internal/logstream"
 	"microagent2/internal/messaging"
+	"microagent2/internal/registry"
 )
 
 func main() {
@@ -47,6 +48,22 @@ func main() {
 		Handler: srv.Handler(),
 	}
 
+	// Self-registration + heartbeat for the dashboard panel.
+	heartbeatMS := envInt("HEARTBEAT_INTERVAL_MS", 3000)
+	selfReg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{
+		AgentID:             "llm-proxy",
+		Priority:            0,
+		Preemptible:         false,
+		Capabilities:        []string{"llm-proxy"},
+		Trigger:             "http",
+		HeartbeatIntervalMS: heartbeatMS,
+		DashboardPanel:      llmproxy.BuildPanelDescriptor(identity),
+	})
+	if err := selfReg.Register(ctx); err != nil {
+		logger.Error("failed_to_register", "error", err.Error())
+	}
+	go selfReg.RunHeartbeat(ctx)
+
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -54,6 +71,7 @@ func main() {
 		logger.Info("shutting down llm-proxy")
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutCancel()
+		_ = selfReg.Deregister(shutCtx)
 		_ = httpSrv.Shutdown(shutCtx)
 		cancel()
 	}()

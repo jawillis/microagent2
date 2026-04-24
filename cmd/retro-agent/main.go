@@ -55,6 +55,7 @@ func main() {
 		Capabilities:        []string{"memory_extraction", "skill_creation", "curation"},
 		Trigger:             "event-driven",
 		HeartbeatIntervalMS: heartbeatMS,
+		DashboardPanel:      retro.BuildPanelDescriptor(),
 	})
 
 	if err := reg.Register(ctx); err != nil {

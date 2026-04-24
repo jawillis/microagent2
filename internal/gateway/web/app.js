@@ -99,10 +99,129 @@
       case "iframe": return renderIframeSection(section);
       case "status": return renderStatusSection(section);
       case "logs":   return renderLogsSection(section);
+      case "action": return renderActionSection(section);
       default:
         var d = el("div", "err", "Unknown section kind: " + section.kind);
         return d;
     }
+  }
+
+  // ---- Action section -------------------------------------------------
+  function renderActionSection(section) {
+    var wrap = el("div", "section section-action");
+    wrap.appendChild(el("h3", null, section.title));
+    (section.actions || []).forEach(function (action) {
+      wrap.appendChild(renderOneAction(action));
+    });
+    return wrap;
+  }
+
+  function renderOneAction(action) {
+    var row = el("div", "action-row");
+    var paramInputs = {};
+    (action.params || []).forEach(function (param) {
+      var label = el("label", "action-param");
+      label.appendChild(el("span", "field-label", param.label || param.name));
+      var input;
+      switch (param.type) {
+        case "textarea":
+          input = el("textarea");
+          input.rows = 3;
+          break;
+        case "boolean":
+          input = el("input");
+          input.type = "checkbox";
+          if (param.default === true) input.checked = true;
+          break;
+        case "enum":
+          input = el("select");
+          (param.values || []).forEach(function (v) {
+            var opt = el("option", null, v);
+            opt.value = v;
+            input.appendChild(opt);
+          });
+          break;
+        case "number":
+        case "integer":
+          input = el("input");
+          input.type = "number";
+          break;
+        default:
+          input = el("input");
+          input.type = "text";
+      }
+      if (param.default !== undefined && param.default !== null && param.type !== "boolean") {
+        input.value = param.default;
+      }
+      paramInputs[param.name] = { input: input, param: param };
+      label.appendChild(input);
+      row.appendChild(label);
+    });
+
+    var btn = el("button", "action-btn", action.label);
+    btn.type = "button";
+    var status = el("span", "action-status");
+    row.appendChild(btn);
+    row.appendChild(status);
+
+    function readParamValue(entry) {
+      var p = entry.param, input = entry.input;
+      switch (p.type) {
+        case "boolean": return input.checked;
+        case "number":  return input.value === "" ? null : parseFloat(input.value);
+        case "integer": return input.value === "" ? null : parseInt(input.value, 10);
+        default:        return input.value;
+      }
+    }
+
+    function collectRequiredMissing() {
+      return (action.params || []).filter(function (p) {
+        if (!p.required) return false;
+        var v = readParamValue(paramInputs[p.name]);
+        return v === null || v === undefined || v === "";
+      }).map(function (p) { return p.name; });
+    }
+
+    btn.addEventListener("click", function () {
+      status.textContent = "";
+      var missing = collectRequiredMissing();
+      if (missing.length) {
+        status.textContent = "Missing required: " + missing.join(", ");
+        status.className = "action-status err";
+        return;
+      }
+      if (action.confirm && !window.confirm(action.confirm)) return;
+
+      // Build URL with {name} substitution from params.
+      var url = action.url;
+      var body = Object.assign({}, action.body || {});
+      Object.keys(paramInputs).forEach(function (name) {
+        var v = readParamValue(paramInputs[name]);
+        var placeholder = "{" + name + "}";
+        if (url.indexOf(placeholder) >= 0) {
+          url = url.replace(placeholder, encodeURIComponent(String(v)));
+        } else {
+          body[name] = v;
+        }
+      });
+
+      var method = (action.method || "POST").toUpperCase();
+      var requestBody = method === "DELETE" ? undefined : body;
+      api(method, url, requestBody).then(function (data) {
+        var msg = "OK";
+        if (action.status_key && data && data[action.status_key] !== undefined) {
+          msg = action.status_key + ": " + data[action.status_key];
+        }
+        status.textContent = msg;
+        status.className = "action-status ok";
+        setTimeout(function () { status.textContent = ""; }, 4000);
+      }).catch(function (err) {
+        status.textContent = "Error: " + err.message;
+        status.className = "action-status err";
+      });
+    });
+
+    return row;
   }
 
   // ---- Logs section ---------------------------------------------------
