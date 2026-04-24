@@ -265,7 +265,7 @@ services:
     ports:
       - "8082:8080"
       - "8083:8081"
-    command: mitmweb --web-host 0.0.0.0 --set web_password=nerdtastic --set stream_large_bodies=1 --mode reverse:http://gateway:8080
+    command: mitmweb --web-host 0.0.0.0 --set web_password=${MITMWEB_PASSWORD:-nerdtastic} --set stream_large_bodies=1 --mode reverse:http://gateway:8080
     networks:
       - microagent
 
