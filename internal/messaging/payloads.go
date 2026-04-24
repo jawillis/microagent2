@@ -33,6 +33,11 @@ type SlotAssignedPayload struct {
 	SlotID int `json:"slot_id"`
 }
 
+type SlotAssignedAckPayload struct {
+	AgentID string `json:"agent_id"`
+	SlotID  int    `json:"slot_id"`
+}
+
 type SlotReleasePayload struct {
 	AgentID string `json:"agent_id"`
 	SlotID  int    `json:"slot_id"`

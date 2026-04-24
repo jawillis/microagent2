@@ -56,6 +56,8 @@ services:
       - LLAMA_API_KEY=${LLAMA_API_KEY:-}
       - SLOT_COUNT=${SLOT_COUNT:-4}
       - PREEMPT_TIMEOUT_MS=${PREEMPT_TIMEOUT_MS:-5000}
+      - PROVISIONAL_TIMEOUT_MS=${PROVISIONAL_TIMEOUT_MS:-2000}
+      - SLOT_SNAPSHOT_INTERVAL_S=${SLOT_SNAPSHOT_INTERVAL_S:-30}
     depends_on:
       valkey:
         condition: service_healthy

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func TestEndToEnd(t *testing.T) {
 
 	// Set up broker
 	reg := registry.NewRegistry()
-	b := broker.New(client, reg, testLogger, llamaAddr, "", "test", 4, 5*time.Second)
+	b := broker.New(client, reg, testLogger, llamaAddr, "", "test", 4, 5*time.Second, 2*time.Second, 30*time.Second)
 	go b.Run(ctx)
 
 	// Set up context manager
@@ -240,14 +241,14 @@ func TestPreemptionFlow(t *testing.T) {
 		Preemptible: true,
 	})
 
-	// 2-slot broker: slot 0 pinned to main-agent, slot 1 available
+	// 2-slot broker, both initially unassigned
 	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Second) // slow response to keep slot occupied
 		fmt.Fprint(w, `{"content":"done","stop":true}`)
 	}))
 	defer llamaServer.Close()
 
-	b := broker.New(client, reg, testLogger, strings.TrimPrefix(llamaServer.URL, "http://"), "", "test", 2, 2*time.Second)
+	b := broker.New(client, reg, testLogger, strings.TrimPrefix(llamaServer.URL, "http://"), "", "test", 2, 2*time.Second, 1*time.Second, 30*time.Second)
 	go b.Run(ctx)
 
 	time.Sleep(300 * time.Millisecond)
@@ -507,4 +508,181 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// 10.7 Two consecutive /v1/responses turns both reach the broker (regression for slot-leak hang)
+func TestTwoTurnResponsesNoSlotLeak(t *testing.T) {
+	client := newTestClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var llamaCalls int32
+	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&llamaCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"reply"},"finish_reason":"stop"}]}`)
+	}))
+	defer llamaServer.Close()
+	llamaAddr := strings.TrimPrefix(llamaServer.URL, "http://")
+
+	muninnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"activations":[]}`)
+	}))
+	defer muninnServer.Close()
+	muninnAddr := strings.TrimPrefix(muninnServer.URL, "http://")
+
+	reg := registry.NewRegistry()
+	b := broker.New(client, reg, testLogger, llamaAddr, "", "test", 2, 5*time.Second, 2*time.Second, 30*time.Second)
+	go b.Run(ctx)
+
+	respStore := response.NewStore(client.Redis())
+	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
+	assembler := appcontext.NewAssembler("You are a test assistant.")
+	mgr := appcontext.NewManager(client, respStore, muninn, assembler, testLogger, 5, 3)
+	go mgr.Run(ctx)
+
+	agentReg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{
+		AgentID:             "main-agent",
+		Priority:            0,
+		Preemptible:         false,
+		Capabilities:        []string{"chat"},
+		Trigger:             "request-driven",
+		HeartbeatIntervalMS: 3000,
+	})
+	if err := agentReg.Register(ctx); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	go agentReg.RunHeartbeat(ctx)
+	time.Sleep(500 * time.Millisecond)
+
+	rt := agent.NewRuntime(client, "main-agent", 0, false, testLogger)
+	agentStream := fmt.Sprintf(messaging.StreamAgentRequests, "main-agent")
+	agentGroup := fmt.Sprintf(messaging.ConsumerGroupAgent, "main-agent")
+	if err := client.EnsureGroup(ctx, agentStream, agentGroup); err != nil {
+		t.Fatalf("ensure agent group: %v", err)
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			msgs, ids, err := client.ReadGroup(ctx, agentStream, agentGroup, "worker", 1, time.Second)
+			if err != nil {
+				continue
+			}
+			for i, msg := range msgs {
+				var payload messaging.ContextAssembledPayload
+				if err := msg.DecodePayload(&payload); err != nil {
+					_ = client.Ack(ctx, agentStream, agentGroup, ids[i])
+					continue
+				}
+				_, slotErr := rt.RequestSlotWithCorrelation(ctx, msg.CorrelationID)
+				if slotErr != nil {
+					_ = client.Ack(ctx, agentStream, agentGroup, ids[i])
+					continue
+				}
+				result, _ := rt.ExecuteWithCorrelation(ctx, msg.CorrelationID, payload.Messages, nil)
+				_ = rt.ReleaseSlotWithCorrelation(ctx, msg.CorrelationID)
+
+				if payload.ReplyStream != "" {
+					reply, _ := messaging.NewReply(msg, messaging.TypeChatResponse, "main-agent", messaging.ChatResponsePayload{
+						SessionID: payload.SessionID,
+						Content:   result,
+						Done:      true,
+					})
+					_, _ = client.Publish(ctx, payload.ReplyStream, reply)
+				}
+				_ = client.Ack(ctx, agentStream, agentGroup, ids[i])
+			}
+		}
+	}()
+
+	gw := gateway.New(client, testLogger, nil, respStore, 15, "8080", "http://"+llamaAddr, "http://"+muninnAddr)
+
+	send := func(body string) map[string]any {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+		gw.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
+	}
+
+	turn1 := send(`{"model":"test","input":"first"}`)
+	respID, _ := turn1["id"].(string)
+	if respID == "" {
+		t.Fatalf("turn 1 missing id: %v", turn1)
+	}
+
+	send(fmt.Sprintf(`{"model":"test","input":"second","previous_response_id":%q}`, respID))
+
+	if got := atomic.LoadInt32(&llamaCalls); got != 2 {
+		t.Fatalf("expected 2 llama calls, got %d (slot leak regression)", got)
+	}
+}
+
+// 10.8 Broker reclaims a provisional slot when the requester never acks.
+func TestBrokerReclaimsProvisionalOnAckTimeout(t *testing.T) {
+	client := newTestClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	reg := registry.NewRegistry()
+	b := broker.New(client, reg, testLogger, "127.0.0.1:0", "", "test", 1, 5*time.Second, 500*time.Millisecond, 30*time.Second)
+	go b.Run(ctx)
+	time.Sleep(500 * time.Millisecond)
+
+	replyStream := fmt.Sprintf("stream:test:reply:%d", time.Now().UnixNano())
+	reqMsg, err := messaging.NewMessage(messaging.TypeSlotRequest, "ghost-agent", messaging.SlotRequestPayload{AgentID: "ghost-agent", Priority: 0})
+	if err != nil {
+		t.Fatalf("new message: %v", err)
+	}
+	reqMsg.ReplyStream = replyStream
+
+	if _, err := client.Publish(ctx, "stream:broker:slot-requests", reqMsg); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Drain the provisional reply to the void (simulating a client that got the reply but never acked).
+	group := "cg:test:reclaim"
+	if err := client.EnsureGroup(ctx, replyStream, group); err != nil {
+		t.Fatalf("ensure group: %v", err)
+	}
+	msgs, ids, _ := client.ReadGroup(ctx, replyStream, group, "r", 1, 3*time.Second)
+	if len(msgs) == 0 {
+		t.Fatal("did not receive slot-assigned reply")
+	}
+	for _, id := range ids {
+		_ = client.Ack(ctx, replyStream, group, id)
+	}
+
+	// Wait past provisional timeout so the broker reclaims.
+	time.Sleep(1 * time.Second)
+
+	// A fresh requester should now be able to claim the slot.
+	reply2Stream := fmt.Sprintf("stream:test:reply2:%d", time.Now().UnixNano())
+	req2, _ := messaging.NewMessage(messaging.TypeSlotRequest, "real-agent", messaging.SlotRequestPayload{AgentID: "real-agent", Priority: 0})
+	req2.ReplyStream = reply2Stream
+	if _, err := client.Publish(ctx, "stream:broker:slot-requests", req2); err != nil {
+		t.Fatalf("publish 2: %v", err)
+	}
+	group2 := "cg:test:reclaim2"
+	if err := client.EnsureGroup(ctx, reply2Stream, group2); err != nil {
+		t.Fatalf("ensure group 2: %v", err)
+	}
+	msgs2, _, _ := client.ReadGroup(ctx, reply2Stream, group2, "r", 1, 3*time.Second)
+	if len(msgs2) == 0 {
+		t.Fatal("second requester did not get slot — reclaim did not fire")
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -39,7 +40,9 @@ func main() {
 
 	reg := registry.NewRegistry()
 	preemptTimeout := time.Duration(brokerCfg.PreemptTimeoutMS) * time.Millisecond
-	b := broker.New(client, reg, logger, llamaAddr, llamaAPIKey, chatCfg.Model, brokerCfg.SlotCount, preemptTimeout)
+	provisionalTimeout := time.Duration(envInt("PROVISIONAL_TIMEOUT_MS", 2000)) * time.Millisecond
+	snapshotInterval := time.Duration(envInt("SLOT_SNAPSHOT_INTERVAL_S", 30)) * time.Second
+	b := broker.New(client, reg, logger, llamaAddr, llamaAPIKey, chatCfg.Model, brokerCfg.SlotCount, preemptTimeout, provisionalTimeout, snapshotInterval)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -59,6 +62,15 @@ func main() {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }

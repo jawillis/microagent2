@@ -60,11 +60,24 @@ func (m *Manager) Run(ctx context.Context) error {
 }
 
 func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("context_handle_request_panic", "correlation_id", msg.CorrelationID, "panic", fmt.Sprint(r))
+		}
+	}()
+	m.logger.Info("context_handle_request_start", "correlation_id", msg.CorrelationID, "type", msg.Type)
 	var payload messaging.ChatRequestPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		m.logger.Error("failed to decode chat request", "error", err)
 		return
 	}
+
+	correlationID := msg.CorrelationID
+	m.logger.Info("context_request_decoded",
+		"correlation_id", correlationID,
+		"session_id", payload.SessionID,
+		"message_count", len(payload.Messages),
+	)
 
 	userMsg := payload.Messages[len(payload.Messages)-1]
 
@@ -75,6 +88,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	type memoryResult struct {
 		memories []Memory
 		err      error
+		elapsed  time.Duration
 	}
 
 	histCh := make(chan historyResult, 1)
@@ -86,40 +100,68 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	}()
 
 	go func() {
+		start := time.Now()
 		mem, err := m.muninn.Recall(ctx, userMsg.Content, m.recallLimit)
-		memCh <- memoryResult{mem, err}
+		memCh <- memoryResult{mem, err, time.Since(start)}
 	}()
 
 	hr := <-histCh
 	mr := <-memCh
 
 	if hr.err != nil {
-		m.logger.Error("failed to get session history", "error", hr.err, "session", payload.SessionID)
+		m.logger.Error("failed to get session history", "correlation_id", correlationID, "error", hr.err, "session", payload.SessionID)
+	} else {
+		m.logger.Info("context_history_loaded",
+			"correlation_id", correlationID,
+			"session_id", payload.SessionID,
+			"history_count", len(hr.history),
+		)
 	}
 	if mr.err != nil {
-		m.logger.Warn("failed to recall memories, proceeding without", "error", mr.err)
+		m.logger.Warn("context_muninn_recall",
+			"correlation_id", correlationID,
+			"elapsed_ms", mr.elapsed.Milliseconds(),
+			"memory_count", 0,
+			"outcome", "error",
+			"error", mr.err.Error(),
+		)
+	} else {
+		m.logger.Info("context_muninn_recall",
+			"correlation_id", correlationID,
+			"elapsed_ms", mr.elapsed.Milliseconds(),
+			"memory_count", len(mr.memories),
+			"outcome", "ok",
+		)
 	}
 
 	assembled := m.assembler.Assemble(mr.memories, hr.history, userMsg)
 
-	agentStream := fmt.Sprintf(messaging.StreamAgentRequests, "main-agent")
+	targetAgent := "main-agent"
+	agentStream := fmt.Sprintf(messaging.StreamAgentRequests, targetAgent)
 	replyStream := msg.ReplyStream
 
 	contextMsg, err := messaging.NewMessage(messaging.TypeContextAssembled, "context-manager", messaging.ContextAssembledPayload{
 		SessionID:   payload.SessionID,
 		Messages:    assembled,
-		TargetAgent: "main-agent",
+		TargetAgent: targetAgent,
 		ReplyStream: replyStream,
 	})
 	if err != nil {
-		m.logger.Error("failed to create context assembled message", "error", err)
+		m.logger.Error("failed to create context assembled message", "correlation_id", correlationID, "error", err)
 		return
 	}
-	contextMsg.CorrelationID = msg.CorrelationID
+	contextMsg.CorrelationID = correlationID
 
 	if _, err := m.client.Publish(ctx, agentStream, contextMsg); err != nil {
-		m.logger.Error("failed to publish to agent stream", "error", err)
+		m.logger.Error("context_publish_failed", "correlation_id", correlationID, "error", err)
+		return
 	}
+	m.logger.Info("context_published",
+		"correlation_id", correlationID,
+		"session_id", payload.SessionID,
+		"target_agent", targetAgent,
+		"assembled_count", len(assembled),
+	)
 
 	go m.preWarmMemories(ctx, payload.SessionID)
 }

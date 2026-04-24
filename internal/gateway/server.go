@@ -166,25 +166,36 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	msg.CorrelationID = correlationID
 	msg.ReplyStream = replyStream
 
+	s.logger.Info("gateway_request_received",
+		"correlation_id", correlationID,
+		"path", r.URL.Path,
+		"session_id", sessionID,
+		"stream", req.Stream,
+		"input_items", len(req.Messages),
+	)
+
+	publishStart := time.Now()
 	if _, err := s.client.Publish(r.Context(), messaging.StreamGatewayRequests, msg); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to publish request")
 		return
 	}
+	s.logger.Info("gateway_request_published", "correlation_id", correlationID, "session_id", sessionID)
 
 	w.Header().Set("X-Session-ID", sessionID)
 
 	responseID := response.NewResponseID()
 
 	if req.Stream {
-		s.handleChatCompletionsStreaming(r.Context(), w, sessionID, correlationID, req.Model, responseID, inputItems)
+		s.handleChatCompletionsStreaming(r.Context(), w, sessionID, correlationID, req.Model, responseID, inputItems, publishStart)
 	} else {
-		s.handleChatCompletionsNonStreaming(r.Context(), w, replyStream, correlationID, sessionID, req.Model, responseID, inputItems)
+		s.handleChatCompletionsNonStreaming(r.Context(), w, replyStream, correlationID, sessionID, req.Model, responseID, inputItems, publishStart)
 	}
 }
 
-func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, correlationID, sessionID, model, responseID string, inputItems []response.InputItem) {
+func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, correlationID, sessionID, model, responseID string, inputItems []response.InputItem, publishStart time.Time) {
 	reply, err := s.client.WaitForReply(ctx, replyStream, correlationID, time.Duration(s.requestTimeoutS)*time.Second)
 	if err != nil {
+		s.logger.Warn("gateway_request_timeout", "correlation_id", correlationID, "session_id", sessionID, "elapsed_ms", time.Since(publishStart).Milliseconds())
 		writeError(w, http.StatusGatewayTimeout, "timeout", "Request timed out waiting for response")
 		return
 	}
@@ -225,9 +236,15 @@ func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.R
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(chatResp)
+	s.logger.Info("gateway_request_completed",
+		"correlation_id", correlationID,
+		"session_id", sessionID,
+		"response_id", responseID,
+		"elapsed_ms", time.Since(publishStart).Milliseconds(),
+	)
 }
 
-func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.ResponseWriter, sessionID, correlationID, model, responseID string, inputItems []response.InputItem) {
+func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.ResponseWriter, sessionID, correlationID, model, responseID string, inputItems []response.InputItem, publishStart time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Streaming not supported")
@@ -241,12 +258,15 @@ func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.Resp
 	channel := fmt.Sprintf(messaging.ChannelTokens, sessionID)
 	sub := s.client.PubSubSubscribe(ctx, channel)
 	defer sub.Close()
+	s.logger.Info("gateway_stream_subscribed", "correlation_id", correlationID, "session_id", sessionID)
 
 	var fullContent string
+	firstTokenSeen := false
 
 	for {
 		select {
 		case <-ctx.Done():
+			s.logger.Warn("gateway_client_disconnected", "correlation_id", correlationID, "session_id", sessionID, "elapsed_ms", time.Since(publishStart).Milliseconds())
 			return
 		case redisMsg := <-sub.Channel():
 			if redisMsg == nil {
@@ -260,6 +280,11 @@ func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.Resp
 			var token messaging.TokenPayload
 			if err := msg.DecodePayload(&token); err != nil {
 				continue
+			}
+
+			if !firstTokenSeen && !token.Done {
+				firstTokenSeen = true
+				s.logger.Info("gateway_stream_first_token", "correlation_id", correlationID, "elapsed_ms_since_published", time.Since(publishStart).Milliseconds())
 			}
 
 			if token.Done {
@@ -293,6 +318,12 @@ func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.Resp
 				fmt.Fprintf(w, "data: %s\n\n", data)
 				fmt.Fprintf(w, "data: [DONE]\n\n")
 				flusher.Flush()
+				s.logger.Info("gateway_request_completed",
+					"correlation_id", correlationID,
+					"session_id", sessionID,
+					"response_id", responseID,
+					"elapsed_ms", time.Since(publishStart).Milliseconds(),
+				)
 				return
 			}
 

@@ -93,12 +93,15 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 		return
 	}
 
-	slotID, err := rt.RequestSlot(ctx)
+	correlationID := msg.CorrelationID
+	logger.Info("message_received", "correlation_id", correlationID, "session_id", payload.SessionID)
+
+	slotID, err := rt.RequestSlotWithCorrelation(ctx, correlationID)
 	if err != nil {
-		logger.Error("failed to get slot", "error", err)
+		logger.Error("failed to get slot", "correlation_id", correlationID, "error", err)
 		return
 	}
-	defer rt.ReleaseSlot(ctx)
+	defer rt.ReleaseSlotWithCorrelation(ctx, correlationID)
 
 	tokenChannel := fmt.Sprintf(messaging.ChannelTokens, payload.SessionID)
 
@@ -112,9 +115,16 @@ func handleRequest(ctx context.Context, client *messaging.Client, rt *agent.Runt
 		}
 	}
 
-	result, err := rt.Execute(ctx, payload.Messages, onToken)
-	if err != nil && err != messaging.ErrPreempted {
-		logger.Error("execution failed", "error", err, "slot", slotID)
+	execStart := time.Now()
+	result, err := rt.ExecuteWithCorrelation(ctx, correlationID, payload.Messages, onToken)
+	execElapsed := time.Since(execStart).Milliseconds()
+	switch {
+	case err == nil:
+		logger.Info("execute_done", "correlation_id", correlationID, "slot", slotID, "elapsed_ms", execElapsed, "outcome", "ok")
+	case err == messaging.ErrPreempted:
+		logger.Info("execute_done", "correlation_id", correlationID, "slot", slotID, "elapsed_ms", execElapsed, "outcome", "preempted")
+	default:
+		logger.Error("execute_done", "correlation_id", correlationID, "slot", slotID, "elapsed_ms", execElapsed, "outcome", "error", "error", err)
 		return
 	}
 

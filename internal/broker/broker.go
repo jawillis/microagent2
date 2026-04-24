@@ -18,18 +18,20 @@ import (
 )
 
 type Broker struct {
-	client         *messaging.Client
-	slots          *SlotTable
-	registry       *registry.Registry
-	regConsumer    *registry.RegistryConsumer
-	logger         *slog.Logger
-	llamaAddr      string
-	llamaAPIKey    string
-	model          string
-	preemptTimeout time.Duration
+	client             *messaging.Client
+	slots              *SlotTable
+	registry           *registry.Registry
+	regConsumer        *registry.RegistryConsumer
+	logger             *slog.Logger
+	llamaAddr          string
+	llamaAPIKey        string
+	model              string
+	preemptTimeout     time.Duration
+	provisionalTimeout time.Duration
+	snapshotInterval   time.Duration
 
-	mu             sync.Mutex
-	pendingQueue   []slotRequest
+	mu           sync.Mutex
+	pendingQueue []slotRequest
 }
 
 type slotRequest struct {
@@ -39,22 +41,27 @@ type slotRequest struct {
 	replyStream   string
 }
 
-func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr, llamaAPIKey, model string, slotCount int, preemptTimeout time.Duration) *Broker {
+func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr, llamaAPIKey, model string, slotCount int, preemptTimeout, provisionalTimeout, snapshotInterval time.Duration) *Broker {
+	if provisionalTimeout <= 0 {
+		provisionalTimeout = 2 * time.Second
+	}
+	if snapshotInterval <= 0 {
+		snapshotInterval = 30 * time.Second
+	}
 	b := &Broker{
-		client:         client,
-		slots:          NewSlotTable(slotCount),
-		registry:       reg,
-		logger:         logger,
-		llamaAddr:      llamaAddr,
-		llamaAPIKey:    llamaAPIKey,
-		model:          model,
-		preemptTimeout: preemptTimeout,
+		client:             client,
+		slots:              NewSlotTable(slotCount),
+		registry:           reg,
+		logger:             logger,
+		llamaAddr:          llamaAddr,
+		llamaAPIKey:        llamaAPIKey,
+		model:              model,
+		preemptTimeout:     preemptTimeout,
+		provisionalTimeout: provisionalTimeout,
+		snapshotInterval:   snapshotInterval,
 	}
 
 	b.regConsumer = registry.NewRegistryConsumer(client, reg, logger, b.handleDeadAgent)
-
-	b.slots.PinSlot(0, "main-agent", 0)
-	logger.Info("slot 0 pinned to main-agent")
 
 	return b
 }
@@ -63,7 +70,21 @@ func (b *Broker) Run(ctx context.Context) error {
 	go b.regConsumer.RunRegistrationConsumer(ctx)
 	go b.regConsumer.RunHeartbeatMonitor(ctx)
 	go b.consumeLLMRequests(ctx)
+	go b.runSnapshotLogger(ctx)
 	return b.consumeSlotRequests(ctx)
+}
+
+func (b *Broker) runSnapshotLogger(ctx context.Context) {
+	t := time.NewTicker(b.snapshotInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			b.logger.Info("slot_table_snapshot", "slots", b.slots.Snapshot())
+		}
+	}
 }
 
 func (b *Broker) consumeSlotRequests(ctx context.Context) error {
@@ -104,6 +125,14 @@ func (b *Broker) handleMessage(ctx context.Context, msg *messaging.Message) {
 		}
 		b.handleSlotRequest(ctx, msg, payload)
 
+	case messaging.TypeSlotAssignedAck:
+		var payload messaging.SlotAssignedAckPayload
+		if err := msg.DecodePayload(&payload); err != nil {
+			b.logger.Error("failed to decode slot assigned ack", "error", err)
+			return
+		}
+		b.handleSlotAssignedAck(msg, payload)
+
 	case messaging.TypeSlotRelease:
 		var payload messaging.SlotReleasePayload
 		if err := msg.DecodePayload(&payload); err != nil {
@@ -117,9 +146,15 @@ func (b *Broker) handleMessage(ctx context.Context, msg *messaging.Message) {
 func (b *Broker) handleSlotRequest(ctx context.Context, msg *messaging.Message, payload messaging.SlotRequestPayload) {
 	slotID, found := b.slots.FindUnassigned()
 	if found {
-		b.slots.Assign(slotID, payload.AgentID, payload.Priority)
-		b.logger.Info("slot assigned", "slot", slotID, "agent", payload.AgentID)
-		b.sendSlotAssigned(ctx, msg, slotID)
+		if !b.slots.AssignProvisional(slotID, payload.AgentID, payload.Priority, msg.CorrelationID) {
+			b.logger.Warn("slot_assign_collision", "slot", slotID, "agent", payload.AgentID)
+			// race: slot taken between find and assign; re-enqueue
+			b.enqueue(msg, payload)
+			return
+		}
+		b.logger.Info("slot_assigned_provisional", "slot", slotID, "agent", payload.AgentID, "correlation_id", msg.CorrelationID)
+		b.sendSlotAssigned(ctx, msg, slotID, payload.AgentID)
+		b.scheduleReclaim(msg.CorrelationID)
 		return
 	}
 
@@ -130,6 +165,10 @@ func (b *Broker) handleSlotRequest(ctx context.Context, msg *messaging.Message, 
 		return
 	}
 
+	b.enqueue(msg, payload)
+}
+
+func (b *Broker) enqueue(msg *messaging.Message, payload messaging.SlotRequestPayload) {
 	b.mu.Lock()
 	b.pendingQueue = append(b.pendingQueue, slotRequest{
 		agentID:       payload.AgentID,
@@ -138,10 +177,41 @@ func (b *Broker) handleSlotRequest(ctx context.Context, msg *messaging.Message, 
 		replyStream:   msg.ReplyStream,
 	})
 	b.mu.Unlock()
-	b.logger.Info("slot request queued", "agent", payload.AgentID)
+	b.logger.Info("slot request queued", "agent", payload.AgentID, "correlation_id", msg.CorrelationID)
+}
+
+func (b *Broker) scheduleReclaim(correlationID string) {
+	go func() {
+		time.Sleep(b.provisionalTimeout)
+		slotID, reverted := b.slots.RevertProvisional(correlationID)
+		if !reverted {
+			return
+		}
+		b.logger.Warn("slot_provisional_reclaimed", "slot", slotID, "correlation_id", correlationID)
+		b.assignFromQueue(context.Background())
+	}()
+}
+
+func (b *Broker) handleSlotAssignedAck(msg *messaging.Message, payload messaging.SlotAssignedAckPayload) {
+	slotID, ok := b.slots.CommitAssignment(msg.CorrelationID)
+	if !ok {
+		b.logger.Warn("slot_assigned_ack_no_match", "correlation_id", msg.CorrelationID, "agent", payload.AgentID, "slot", payload.SlotID)
+		return
+	}
+	b.logger.Info("slot_assigned_committed", "slot", slotID, "agent", payload.AgentID, "correlation_id", msg.CorrelationID)
 }
 
 func (b *Broker) handleSlotRelease(ctx context.Context, payload messaging.SlotReleasePayload) {
+	if payload.SlotID == -1 {
+		released := b.slots.ReleaseByAgent(payload.AgentID)
+		if len(released) == 0 {
+			b.logger.Info("slot_release_by_agent_noop", "agent", payload.AgentID)
+			return
+		}
+		b.logger.Info("slot_released_by_agent", "agent", payload.AgentID, "slots", released)
+		b.assignFromQueue(ctx)
+		return
+	}
 	b.slots.Release(payload.SlotID)
 	b.logger.Info("slot released", "slot", payload.SlotID, "agent", payload.AgentID)
 	b.assignFromQueue(ctx)
@@ -167,11 +237,11 @@ func (b *Broker) preemptAgent(ctx context.Context, victimAgent string, slotID in
 			b.registry.MarkDead(victimAgent)
 		}
 		b.slots.ForceAssign(slotID, requester.AgentID, requester.Priority)
-		b.sendSlotAssigned(ctx, originalMsg, slotID)
+		b.sendSlotAssigned(ctx, originalMsg, slotID, requester.AgentID)
 	}()
 }
 
-func (b *Broker) sendSlotAssigned(ctx context.Context, original *messaging.Message, slotID int) {
+func (b *Broker) sendSlotAssigned(ctx context.Context, original *messaging.Message, slotID int, agentID string) {
 	if original.ReplyStream == "" {
 		return
 	}
@@ -180,19 +250,27 @@ func (b *Broker) sendSlotAssigned(ctx context.Context, original *messaging.Messa
 		b.logger.Error("failed to create slot assigned reply", "error", err)
 		return
 	}
-	_, _ = b.client.Publish(ctx, original.ReplyStream, reply)
+	if _, err := b.client.Publish(ctx, original.ReplyStream, reply); err != nil {
+		b.logger.Error("slot_assigned_reply_failed", "error", err, "slot", slotID, "agent", agentID, "correlation_id", original.CorrelationID)
+		if _, reverted := b.slots.RevertProvisional(original.CorrelationID); reverted {
+			b.logger.Warn("slot_provisional_reverted_after_publish_fail", "slot", slotID, "correlation_id", original.CorrelationID)
+			b.assignFromQueue(ctx)
+		}
+		return
+	}
+	b.logger.Info("slot_assigned_reply_published", "slot", slotID, "agent", agentID, "correlation_id", original.CorrelationID)
 }
 
 func (b *Broker) assignFromQueue(ctx context.Context) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	if len(b.pendingQueue) == 0 {
+		b.mu.Unlock()
 		return
 	}
 
 	slotID, found := b.slots.FindUnassigned()
 	if !found {
+		b.mu.Unlock()
 		return
 	}
 
@@ -205,17 +283,37 @@ func (b *Broker) assignFromQueue(ctx context.Context) {
 
 	req := b.pendingQueue[bestIdx]
 	b.pendingQueue = append(b.pendingQueue[:bestIdx], b.pendingQueue[bestIdx+1:]...)
+	b.mu.Unlock()
 
-	b.slots.Assign(slotID, req.agentID, req.priority)
-	b.logger.Info("slot assigned from queue", "slot", slotID, "agent", req.agentID)
-
-	if req.replyStream != "" {
-		reply, err := messaging.NewMessage(messaging.TypeSlotAssigned, "llm-broker", messaging.SlotAssignedPayload{SlotID: slotID})
-		if err == nil {
-			reply.CorrelationID = req.correlationID
-			_, _ = b.client.Publish(ctx, req.replyStream, reply)
-		}
+	if !b.slots.AssignProvisional(slotID, req.agentID, req.priority, req.correlationID) {
+		b.logger.Warn("slot_assign_collision", "slot", slotID, "agent", req.agentID)
+		// re-enqueue
+		b.mu.Lock()
+		b.pendingQueue = append(b.pendingQueue, req)
+		b.mu.Unlock()
+		return
 	}
+	b.logger.Info("slot_assigned_provisional_from_queue", "slot", slotID, "agent", req.agentID, "correlation_id", req.correlationID)
+
+	if req.replyStream == "" {
+		// Without a reply stream we can't confirm; treat as failed.
+		b.slots.RevertProvisional(req.correlationID)
+		return
+	}
+	reply, err := messaging.NewMessage(messaging.TypeSlotAssigned, "llm-broker", messaging.SlotAssignedPayload{SlotID: slotID})
+	if err != nil {
+		b.logger.Error("failed to create slot assigned reply", "error", err)
+		b.slots.RevertProvisional(req.correlationID)
+		return
+	}
+	reply.CorrelationID = req.correlationID
+	if _, err := b.client.Publish(ctx, req.replyStream, reply); err != nil {
+		b.logger.Error("slot_assigned_reply_failed", "error", err, "slot", slotID, "agent", req.agentID, "correlation_id", req.correlationID)
+		b.slots.RevertProvisional(req.correlationID)
+		return
+	}
+	b.logger.Info("slot_assigned_reply_published", "slot", slotID, "agent", req.agentID, "correlation_id", req.correlationID)
+	b.scheduleReclaim(req.correlationID)
 }
 
 func (b *Broker) consumeLLMRequests(ctx context.Context) error {
@@ -250,6 +348,17 @@ func (b *Broker) handleLLMRequest(ctx context.Context, msg *messaging.Message) {
 	var payload messaging.LLMRequestPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		b.logger.Error("failed to decode LLM request", "error", err)
+		return
+	}
+
+	if !b.slots.IsOwnedBy(payload.SlotID, msg.Source) {
+		b.logger.Error("llm_request_slot_not_owned", "slot", payload.SlotID, "agent", msg.Source, "correlation_id", msg.CorrelationID)
+		if msg.ReplyStream != "" {
+			doneMsg, err := messaging.NewReply(msg, messaging.TypeToken, "llm-broker", messaging.TokenPayload{Done: true})
+			if err == nil {
+				_, _ = b.client.Publish(ctx, msg.ReplyStream, doneMsg)
+			}
+		}
 		return
 	}
 

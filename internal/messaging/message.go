@@ -12,6 +12,7 @@ type MessageType string
 const (
 	TypeSlotRequest     MessageType = "slot_request"
 	TypeSlotAssigned    MessageType = "slot_assigned"
+	TypeSlotAssignedAck MessageType = "slot_assigned_ack"
 	TypeSlotRelease     MessageType = "slot_release"
 	TypeSlotAvailable   MessageType = "slot_available"
 	TypePreempt         MessageType = "preempt"
