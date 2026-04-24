@@ -18,7 +18,7 @@ import (
 //
 // bankID is surfaced in a readonly form field so operators can confirm
 // which bank memory-service is talking to without leaving the dashboard.
-func BuildPanelDescriptor(cpURL, bankID string) *dashboard.PanelDescriptor {
+func BuildPanelDescriptor(cpURL, bankID, statusURL string) *dashboard.PanelDescriptor {
 	order := 200
 	return &dashboard.PanelDescriptor{
 		Version: dashboard.CurrentDescriptorVersion,
@@ -65,6 +65,23 @@ func BuildPanelDescriptor(cpURL, bankID string) *dashboard.PanelDescriptor {
 							Description: "Comma-separated list of well-known tags the extractor is encouraged to use. Informational for now.",
 							Default:     config.DefaultTagTaxonomy,
 						},
+						"primary_user_id": {
+							Type:        dashboard.FieldString,
+							Label:       "Primary User ID",
+							Description: "Fallback speaker for anonymous requests. Leave empty for multi-user deployments.",
+						},
+						"recall_default_speaker_scope": {
+							Type:        dashboard.FieldEnum,
+							Label:       "Recall Speaker Scope",
+							Description: "How recall treats missing speaker_id filter. 'any' = no implicit scope, 'primary' = restrict to primary_user_id, 'explicit' = require caller to specify.",
+							Values:      config.ValidRecallSpeakerScope(),
+							Default:     config.DefaultRecallSpeakerScope,
+						},
+						"identity_name_denylist": {
+							Type:        dashboard.FieldString,
+							Label:       "Identity Name Denylist",
+							Description: "Comma-separated names that trigger a startup warning if found in missions/directives. For catching hard-coded person references.",
+						},
 						"memory_bank_id": {
 							Type:        dashboard.FieldString,
 							Label:       "Memory Bank ID",
@@ -73,6 +90,14 @@ func BuildPanelDescriptor(cpURL, bankID string) *dashboard.PanelDescriptor {
 							Readonly:    true,
 						},
 					},
+				},
+			},
+			{
+				Kind: dashboard.KindStatus,
+				Status: &dashboard.StatusSection{
+					Title:  "Identity Stats",
+					URL:    statusURL,
+					Layout: dashboard.StatusKeyValue,
 				},
 			},
 			{

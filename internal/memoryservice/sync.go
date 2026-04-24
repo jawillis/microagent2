@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strings"
 
 	"microagent2/internal/hindsight"
 )
@@ -139,6 +140,58 @@ func (s *Syncer) syncDirectives(ctx context.Context, seed *SeedConfig) error {
 		s.logger.Info("memory_directive_updated", "bank_id", s.bankID, "name", want.Name, "id", cur.ID)
 	}
 	return nil
+}
+
+// CheckDenylist scans all mission and directive text for entries in
+// denylist (comma-separated names). Logs WARN per hit but does not
+// block sync. Returns the count of hits.
+func CheckDenylist(seed *SeedConfig, denylist string, logger *slog.Logger) int {
+	if denylist == "" || seed == nil {
+		return 0
+	}
+	names := splitDenylist(denylist)
+	if len(names) == 0 {
+		return 0
+	}
+	hits := 0
+	for field, text := range seed.Missions {
+		lower := strings.ToLower(text)
+		for _, name := range names {
+			if strings.Contains(lower, strings.ToLower(name)) {
+				logger.Warn("identity_hardcoded_name_detected",
+					"source", "mission",
+					"field", field,
+					"name", name,
+				)
+				hits++
+			}
+		}
+	}
+	for _, d := range seed.Directives {
+		lower := strings.ToLower(d.Content)
+		for _, name := range names {
+			if strings.Contains(lower, strings.ToLower(name)) {
+				logger.Warn("identity_hardcoded_name_detected",
+					"source", "directive",
+					"name_field", d.Name,
+					"name", name,
+				)
+				hits++
+			}
+		}
+	}
+	return hits
+}
+
+func splitDenylist(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		t := strings.TrimSpace(part)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func tagsEqual(a, b []string) bool {

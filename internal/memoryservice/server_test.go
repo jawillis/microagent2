@@ -442,3 +442,332 @@ func TestRecall_CallerTypesOverrideResolver(t *testing.T) {
 		t.Fatalf("types = %v; caller should win", got)
 	}
 }
+
+// --- retain speaker_id / fact_type ---
+
+func TestRetain_DefaultsSpeakerToUnknown(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RetainRequest{Content: "hello"})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if got := fh.lastRetain.Items[0].Metadata["speaker_id"]; got != "unknown" {
+		t.Fatalf("speaker_id = %q; want unknown", got)
+	}
+	if s.UnknownSpeakerRetains() != 1 {
+		t.Fatalf("unknown counter = %d; want 1", s.UnknownSpeakerRetains())
+	}
+}
+
+func TestRetain_DefaultsSpeakerToPrimaryUserID(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{PrimaryUserID: "jason"})
+	body, _ := json.Marshal(memoryclient.RetainRequest{Content: "hello"})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["speaker_id"]; got != "jason" {
+		t.Fatalf("speaker_id = %q; want jason", got)
+	}
+	if s.UnknownSpeakerRetains() != 0 {
+		t.Fatalf("unknown counter = %d; want 0", s.UnknownSpeakerRetains())
+	}
+}
+
+func TestRetain_PreservesExplicitSpeaker(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{PrimaryUserID: "jason"})
+	body, _ := json.Marshal(memoryclient.RetainRequest{
+		Content:  "hello",
+		Metadata: map[string]string{"speaker_id": "alice"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["speaker_id"]; got != "alice" {
+		t.Fatalf("speaker_id = %q; want alice (explicit wins over primary_user_id)", got)
+	}
+}
+
+func TestRetain_ValidatesFactType(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RetainRequest{
+		Content:  "hello",
+		Metadata: map[string]string{"fact_type": "bogus_fact"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 for invalid fact_type", rec.Code)
+	}
+	var eb errBody
+	_ = json.NewDecoder(rec.Body).Decode(&eb)
+	if eb.Error.Code != "invalid_fact_type" {
+		t.Fatalf("code = %q", eb.Error.Code)
+	}
+}
+
+func TestRetain_AcceptsValidFactType(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	for _, ft := range []string{"person_fact", "world_fact", "context_fact", "procedural_fact"} {
+		body, _ := json.Marshal(memoryclient.RetainRequest{
+			Content:  "hello",
+			Metadata: map[string]string{"fact_type": ft},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("fact_type=%q: status = %d", ft, rec.Code)
+		}
+		if got := fh.lastRetain.Items[0].Metadata["fact_type"]; got != ft {
+			t.Fatalf("fact_type = %q; want %q", got, ft)
+		}
+	}
+}
+
+func TestRetain_InfersContextFact(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RetainRequest{Content: "I went to the store yesterday"})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["fact_type"]; got != "context_fact" {
+		t.Fatalf("fact_type = %q; want context_fact (time cue: yesterday)", got)
+	}
+}
+
+func TestRetain_InfersPersonFact(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RetainRequest{
+		Content:  "Alice likes green tea",
+		Entities: []string{"alice"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["fact_type"]; got != "person_fact" {
+		t.Fatalf("fact_type = %q; want person_fact (non-class entity)", got)
+	}
+}
+
+func TestRetain_InfersWorldFactForClassEntities(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RetainRequest{
+		Content:  "Go is a compiled language",
+		Entities: []string{"class:programming_language"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["fact_type"]; got != "world_fact" {
+		t.Fatalf("fact_type = %q; want world_fact (only class entities)", got)
+	}
+}
+
+func TestRetain_InfersWorldFactDefault(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RetainRequest{Content: "The sky is blue"})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["fact_type"]; got != "world_fact" {
+		t.Fatalf("fact_type = %q; want world_fact (no entities, no time cues)", got)
+	}
+}
+
+func TestRetain_MapsEntitiesToHindsight(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RetainRequest{
+		Content:  "Alice and Bob met",
+		Entities: []string{"alice", "bob"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	entities := fh.lastRetain.Items[0].Entities
+	if len(entities) != 2 {
+		t.Fatalf("entities = %d; want 2", len(entities))
+	}
+	if entities[0].Text != "alice" || entities[1].Text != "bob" {
+		t.Fatalf("entities = %+v", entities)
+	}
+}
+
+// --- recall speaker_id / fact_type / entities ---
+
+func TestRecall_SpeakerIDPassedAsMetadataFilter(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "coffee", SpeakerID: "alice"})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if fh.lastRecall.Metadata == nil || fh.lastRecall.Metadata["speaker_id"] != "alice" {
+		t.Fatalf("metadata = %+v; want speaker_id=alice", fh.lastRecall.Metadata)
+	}
+}
+
+func TestRecall_NoSpeakerScopeAny_NoFilter(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{
+		RecallDefaultSpeakerScope: "any",
+	})
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "coffee"})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if fh.lastRecall.Metadata != nil && fh.lastRecall.Metadata["speaker_id"] != "" {
+		t.Fatalf("scope=any should not add speaker filter; got metadata=%+v", fh.lastRecall.Metadata)
+	}
+}
+
+func TestRecall_NoSpeakerScopePrimary_UsesPrimaryUserID(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{
+		RecallDefaultSpeakerScope: "primary",
+		PrimaryUserID:             "jason",
+	})
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "coffee"})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if fh.lastRecall.Metadata == nil || fh.lastRecall.Metadata["speaker_id"] != "jason" {
+		t.Fatalf("scope=primary should use primary_user_id; got metadata=%+v", fh.lastRecall.Metadata)
+	}
+}
+
+func TestRecall_NoSpeakerScopeExplicit_Returns400(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{
+		RecallDefaultSpeakerScope: "explicit",
+	})
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "coffee"})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 for explicit scope + no speaker", rec.Code)
+	}
+	var eb errBody
+	_ = json.NewDecoder(rec.Body).Decode(&eb)
+	if eb.Error.Code != "speaker_required" {
+		t.Fatalf("code = %q", eb.Error.Code)
+	}
+}
+
+func TestRecall_EntitiesPassedThrough(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RecallRequest{
+		Query:    "preferences",
+		Entities: []string{"alice"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(fh.lastRecall.Entities) != 1 || fh.lastRecall.Entities[0] != "alice" {
+		t.Fatalf("entities = %v; want [alice]", fh.lastRecall.Entities)
+	}
+}
+
+func TestRecall_FactTypesFilterSingle(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RecallRequest{
+		Query:     "preferences",
+		FactTypes: []string{"person_fact"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if fh.lastRecall.Metadata == nil || fh.lastRecall.Metadata["fact_type"] != "person_fact" {
+		t.Fatalf("metadata = %+v; want fact_type=person_fact", fh.lastRecall.Metadata)
+	}
+}
+
+func TestRecall_InvalidFactTypeReturns400(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+	body, _ := json.Marshal(memoryclient.RecallRequest{
+		Query:     "x",
+		FactTypes: []string{"bogus_fact"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400", rec.Code)
+	}
+}
+
+func TestStatus_ReturnsUnknownSpeakerCounter(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := newTestServer(t, fh)
+
+	// Retain with no speaker → increments counter
+	body, _ := json.Marshal(memoryclient.RetainRequest{Content: "hi"})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	req = httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var m map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&m)
+	if v, ok := m["unknown_speaker_retains"].(float64); !ok || v != 1 {
+		t.Fatalf("unknown_speaker_retains = %v; want 1", m["unknown_speaker_retains"])
+	}
+}

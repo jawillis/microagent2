@@ -52,6 +52,7 @@ type Response struct {
 	Output             []OutputItem `json:"output"`
 	PreviousResponseID string       `json:"previous_response_id"`
 	SessionID          string       `json:"session_id"`
+	SpeakerID          string       `json:"speaker_id,omitempty"`
 	Model              string       `json:"model"`
 	CreatedAt          string       `json:"created_at"`
 	Status             Status       `json:"status"`
@@ -144,6 +145,7 @@ func (s *Store) Save(ctx context.Context, resp *Response) error {
 		"output":               string(outputJSON),
 		"previous_response_id": resp.PreviousResponseID,
 		"session_id":           resp.SessionID,
+		"speaker_id":           resp.SpeakerID,
 		"model":                resp.Model,
 		"created_at":           resp.CreatedAt,
 		"status":               string(resp.Status),
@@ -172,6 +174,7 @@ func decodeResponse(vals map[string]string) (*Response, error) {
 		ID:                 vals["id"],
 		PreviousResponseID: vals["previous_response_id"],
 		SessionID:          vals["session_id"],
+		SpeakerID:          vals["speaker_id"],
 		Model:              vals["model"],
 		CreatedAt:          vals["created_at"],
 		Status:             Status(vals["status"]),
@@ -334,6 +337,30 @@ func (s *Store) InheritSessionID(ctx context.Context, previousResponseID string)
 	return sid, err
 }
 
+// InheritSpeakerID reads the speaker_id from a previous response.
+// Returns "" with no error when the field is absent (pre-change responses).
+func (s *Store) InheritSpeakerID(ctx context.Context, previousResponseID string) (string, error) {
+	sid, err := s.rdb.HGet(ctx, responseKey(previousResponseID), "speaker_id").Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return sid, err
+}
+
+// GetSessionSpeakerID returns the speaker_id from the last response in a session.
+// Returns "" when absent or on error.
+func (s *Store) GetSessionSpeakerID(ctx context.Context, sessionID string) string {
+	lastID, err := s.rdb.LIndex(ctx, sessionResponsesKey(sessionID), -1).Result()
+	if err != nil || lastID == "" {
+		return ""
+	}
+	sid, err := s.rdb.HGet(ctx, responseKey(lastID), "speaker_id").Result()
+	if err != nil {
+		return ""
+	}
+	return sid
+}
+
 // DeleteSession removes all response hashes referenced by the session's response list,
 // the response list key, and session metadata.
 func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
@@ -360,9 +387,10 @@ func (s *Store) SessionExists(ctx context.Context, sessionID string) (bool, erro
 
 // ListSessions scans for all session response lists and returns session summaries.
 type SessionSummary struct {
-	SessionID  string `json:"session_id"`
-	TurnCount  int    `json:"turn_count"`
-	LastActive string `json:"last_active"`
+	SessionID      string `json:"session_id"`
+	TurnCount      int    `json:"turn_count"`
+	LastActive     string `json:"last_active"`
+	LastSpeakerID  string `json:"last_speaker_id,omitempty"`
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]SessionSummary, error) {
@@ -382,16 +410,27 @@ func (s *Store) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 			count, _ := s.rdb.LLen(ctx, key).Result()
 
 			lastActive := ""
+			lastSpeaker := ""
 			lastID, err := s.rdb.LIndex(ctx, key, -1).Result()
 			if err == nil && lastID != "" {
-				ts, _ := s.rdb.HGet(ctx, responseKey(lastID), "created_at").Result()
-				lastActive = ts
+				vals, _ := s.rdb.HMGet(ctx, responseKey(lastID), "created_at", "speaker_id").Result()
+				if len(vals) > 0 {
+					if ts, ok := vals[0].(string); ok {
+						lastActive = ts
+					}
+				}
+				if len(vals) > 1 {
+					if sp, ok := vals[1].(string); ok {
+						lastSpeaker = sp
+					}
+				}
 			}
 
 			sessions = append(sessions, SessionSummary{
-				SessionID:  parts,
-				TurnCount:  int(count),
-				LastActive: lastActive,
+				SessionID:     parts,
+				TurnCount:     int(count),
+				LastActive:    lastActive,
+				LastSpeakerID: lastSpeaker,
 			})
 		}
 		cursor = next

@@ -604,6 +604,18 @@ models" call.
   defensible because muninndb's retrieval behavior was unreliable
   enough that porting its contents would pollute the new substrate.
 
+## Multi-speaker identity model
+
+Memories carry a three-axis attribution model stored in Hindsight metadata (not tags, to avoid changing consolidation scope):
+
+- **`speaker_id`** — who stated or authored the fact. Resolved at the gateway via a 5-step precedence: request body → `X-Speaker-ID` header → previous-turn inheritance → `primary_user_id` config → `"unknown"`.
+- **`fact_type`** — one of `person_fact`, `world_fact`, `context_fact`, `procedural_fact`. Inferred conservatively at retain time when not explicitly provided.
+- **`entities`** — who or what the fact is *about* (distinct from speaker). Uses Hindsight's entity resolution (lexical, not semantic). Class-level references use the `class:` prefix convention.
+
+Recall can filter on any axis. The `recall_default_speaker_scope` config (`any` | `primary` | `explicit`) controls how missing `speaker_id` filters are handled. Missions and directives use role-based language ("the speaker") rather than proper names.
+
+See `openspec/specs/identity-model/spec.md` for the full specification.
+
 ## Appendix A: Prior thinking
 
 See `docs/homegrown-memory-system.md` for the Postgres+pgvector path

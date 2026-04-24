@@ -12,13 +12,14 @@ import (
 )
 
 type responsesRequest struct {
-	Input              any     `json:"input"`
-	Model              string  `json:"model"`
-	PreviousResponseID string  `json:"previous_response_id,omitempty"`
+	Input              any             `json:"input"`
+	Model              string          `json:"model"`
+	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 	Tools              json.RawMessage `json:"tools,omitempty"`
 	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
-	Stream             bool    `json:"stream"`
-	Store              *bool   `json:"store,omitempty"`
+	Stream             bool            `json:"stream"`
+	Store              *bool           `json:"store,omitempty"`
+	SpeakerID          string          `json:"speaker_id,omitempty"`
 }
 
 type responsesResponse struct {
@@ -61,6 +62,11 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	stitchPrefixHash := decision.StitchPrefixHash
 	stitched := decision.Stitched
 
+	speakerID := resolveSpeakerID(r.Context(), req.SpeakerID, r, req.PreviousResponseID, s.responses, s.configStore)
+	if speakerID == "unknown" {
+		s.logger.Warn("gateway_speaker_unknown", "correlation_id", "", "session_id", sessionID, "path", r.URL.Path)
+	}
+
 	var historyMsgs []messaging.ChatMsg
 	if req.PreviousResponseID != "" {
 		chain, err := s.responses.WalkChain(r.Context(), req.PreviousResponseID)
@@ -96,6 +102,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		Messages:  allMsgs,
 		Model:     req.Model,
 		Stream:    req.Stream,
+		SpeakerID: speakerID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create message")
@@ -124,15 +131,16 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	)
 
 	w.Header().Set("X-Session-ID", sessionID)
+	w.Header().Set("X-Speaker-ID", speakerID)
 
 	if req.Stream {
-		s.handleResponsesStreaming(r.Context(), w, responseID, sessionID, correlationID, req.Model, effectivePrevRespID, inputItems, shouldStore, publishStart)
+		s.handleResponsesStreaming(r.Context(), w, responseID, sessionID, correlationID, req.Model, effectivePrevRespID, inputItems, shouldStore, publishStart, speakerID)
 	} else {
-		s.handleResponsesNonStreaming(r.Context(), w, replyStream, responseID, sessionID, correlationID, req.Model, effectivePrevRespID, inputItems, shouldStore, publishStart)
+		s.handleResponsesNonStreaming(r.Context(), w, replyStream, responseID, sessionID, correlationID, req.Model, effectivePrevRespID, inputItems, shouldStore, publishStart, speakerID)
 	}
 }
 
-func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, responseID, sessionID, correlationID, model, previousResponseID string, inputItems []response.InputItem, store bool, publishStart time.Time) {
+func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, responseID, sessionID, correlationID, model, previousResponseID string, inputItems []response.InputItem, store bool, publishStart time.Time, speakerID string) {
 	reply, err := s.client.WaitForReply(ctx, replyStream, correlationID, time.Duration(s.requestTimeoutS)*time.Second)
 	if err != nil {
 		s.logger.Warn("gateway_request_timeout", "correlation_id", correlationID, "session_id", sessionID, "elapsed_ms", time.Since(publishStart).Milliseconds())
@@ -183,6 +191,7 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 			Output:             outputItems,
 			PreviousResponseID: previousResponseID,
 			SessionID:          sessionID,
+			SpeakerID:          speakerID,
 			Model:              model,
 			CreatedAt:          time.Now().UTC().Format(time.RFC3339),
 			Status:             response.StatusCompleted,
@@ -222,7 +231,7 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 	)
 }
 
-func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWriter, responseID, sessionID, correlationID, model, previousResponseID string, inputItems []response.InputItem, store bool, publishStart time.Time) {
+func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWriter, responseID, sessionID, correlationID, model, previousResponseID string, inputItems []response.InputItem, store bool, publishStart time.Time, speakerID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Streaming not supported")
@@ -339,6 +348,7 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 						Output:             outputItems,
 						PreviousResponseID: previousResponseID,
 						SessionID:          sessionID,
+						SpeakerID:          speakerID,
 						Model:              model,
 						CreatedAt:          time.Now().UTC().Format(time.RFC3339),
 						Status:             response.StatusCompleted,

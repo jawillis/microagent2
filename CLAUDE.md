@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-This is a greenfield project. No application code exists yet — only workflow scaffolding via OpenSpec.
+Active development. Core services (gateway, context-manager, memory-service, retro-agent, llm-broker, llm-proxy) are implemented.
+
+### Key Design Documents
+
+- `docs/memory-system-design.md` — Memory layer design (Hindsight substrate, multi-speaker identity model, three-axis fact attribution)
+- `docs/curiosity-and-initiative.md` — Agent idle-time research and proactive conversation
+- `docs/self-improvement-framework.md` — Policy registry, reward modeling, LoRA pipeline
 
 ## Workflow: OpenSpec
 

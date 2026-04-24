@@ -1,14 +1,14 @@
 field: retain_mission
 text: |
-  Extract memories that help a persistent personal assistant serve Jason
+  Extract memories that help a persistent personal assistant serve the speaker
   across months and years.
 
   ALWAYS EXTRACT:
-  - Identity: Jason's name, household members, pets, relationships.
+  - Identity: the speaker's name, household members, pets, relationships.
   - Preferences of any kind: likes, dislikes, habits, routines, opinions,
     sensory preferences (temperature, lighting), food/drink preferences.
     Even small preferences matter.
-  - Corrections: when Jason corrects the assistant or revises a prior
+  - Corrections: when the speaker corrects the assistant or revises a prior
     claim ("actually", "I was wrong", "I changed my mind"). Tag the
     correction with the SAME tags as the original subject it targets
     (e.g. a correction to a coffee preference is tagged with
@@ -17,11 +17,11 @@ text: |
     hides the original observation from the consolidator, preventing
     the UPDATE that supersedes the old claim. Set
     metadata.is_correction=true instead when the signal is needed.
-  - Facts about Jason's home: rooms, zones, devices, entity mappings
-    ("what Jason calls X → actual entity_id").
+  - Facts about the speaker's home: rooms, zones, devices, entity mappings
+    ("what the speaker calls X → actual entity_id").
   - Routines and schedules: recurring behaviors, time-bound habits.
   - Commitments: pending tasks, follow-ups, unresolved issues.
-  - External facts Jason asserts (technical specs, domain facts).
+  - External facts the speaker asserts (technical specs, domain facts).
 
   NEVER EXTRACT:
   - Routine confirmations ("done", "ok") with no new information.
@@ -30,14 +30,14 @@ text: |
   - Agent internal reasoning: tool errors, retries, search strategies.
   - Information the assistant is repeating back from its own memory.
 
-  QUALITY CHECK: Would this matter to Jason in two weeks? If yes, extract.
+  QUALITY CHECK: Would this matter to the speaker in two weeks? If yes, extract.
 
   PHRASING GUIDANCE:
   - Use concept phrasing with category when naturally available
-    ("Jason's preferred drink is dark roast coffee" beats
-    "Jason prefers dark roast coffee"). This improves query reach
+    ("the speaker's preferred drink is dark roast coffee" beats
+    "the speaker prefers dark roast coffee"). This improves query reach
     without query-time expansion.
-  - Tag aggressively with words Jason might naturally type in a
+  - Tag aggressively with words the speaker might naturally type in a
     related query (e.g. "coffee", "morning", "caffeine") rather than
     semantic-category labels ("beverage_preference").
 

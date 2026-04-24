@@ -17,6 +17,7 @@ import (
 
 	"microagent2/internal/agent"
 	"microagent2/internal/broker"
+	"microagent2/internal/config"
 	appcontext "microagent2/internal/context"
 	"microagent2/internal/gateway"
 	"microagent2/internal/memoryclient"
@@ -92,7 +93,8 @@ func TestEndToEnd(t *testing.T) {
 	respStore := response.NewStore(client.Redis())
 	mc := memoryclient.New(memSrv.URL)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
-	mgr := appcontext.NewManager(client, respStore, mc, assembler, testLogger, 5, 3)
+	cfgStore := config.NewStore(client.Redis())
+	mgr := appcontext.NewManager(client, respStore, mc, assembler, testLogger, 5, 3, cfgStore)
 	go mgr.Run(ctx)
 
 	// Register main agent
@@ -553,7 +555,8 @@ func TestTwoTurnResponsesNoSlotLeak(t *testing.T) {
 	respStore := response.NewStore(client.Redis())
 	mc := memoryclient.New(memSrv.URL)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
-	mgr := appcontext.NewManager(client, respStore, mc, assembler, testLogger, 5, 3)
+	cfgStore := config.NewStore(client.Redis())
+	mgr := appcontext.NewManager(client, respStore, mc, assembler, testLogger, 5, 3, cfgStore)
 	go mgr.Run(ctx)
 
 	agentReg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{

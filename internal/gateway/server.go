@@ -117,6 +117,7 @@ type openAIRequest struct {
 	Messages  []openAIMsg `json:"messages"`
 	Stream    bool        `json:"stream"`
 	SessionID string      `json:"session_id,omitempty"`
+	SpeakerID string      `json:"speaker_id,omitempty"`
 }
 
 type openAIMsg struct {
@@ -191,6 +192,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	inputItems := messagesToInputItems(req.Messages)
 
+	speakerID := resolveSpeakerID(r.Context(), req.SpeakerID, r, "", nil, s.configStore)
+	if speakerID == "unknown" {
+		s.logger.Warn("gateway_speaker_unknown", "correlation_id", "", "session_id", sessionID, "path", r.URL.Path)
+	}
+
 	correlationID := messaging.NewCorrelationID()
 	msgs := make([]messaging.ChatMsg, len(req.Messages))
 	for i, m := range req.Messages {
@@ -204,6 +210,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Messages:  msgs,
 		Model:     req.Model,
 		Stream:    req.Stream,
+		SpeakerID: speakerID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create message")
@@ -228,17 +235,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("gateway_request_published", "correlation_id", correlationID, "session_id", sessionID)
 
 	w.Header().Set("X-Session-ID", sessionID)
+	w.Header().Set("X-Speaker-ID", speakerID)
 
 	responseID := response.NewResponseID()
 
 	if req.Stream {
-		s.handleChatCompletionsStreaming(r.Context(), w, sessionID, correlationID, req.Model, responseID, inputItems, publishStart)
+		s.handleChatCompletionsStreaming(r.Context(), w, sessionID, correlationID, req.Model, responseID, inputItems, publishStart, speakerID)
 	} else {
-		s.handleChatCompletionsNonStreaming(r.Context(), w, replyStream, correlationID, sessionID, req.Model, responseID, inputItems, publishStart)
+		s.handleChatCompletionsNonStreaming(r.Context(), w, replyStream, correlationID, sessionID, req.Model, responseID, inputItems, publishStart, speakerID)
 	}
 }
 
-func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, correlationID, sessionID, model, responseID string, inputItems []response.InputItem, publishStart time.Time) {
+func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, correlationID, sessionID, model, responseID string, inputItems []response.InputItem, publishStart time.Time, speakerID string) {
 	reply, err := s.client.WaitForReply(ctx, replyStream, correlationID, time.Duration(s.requestTimeoutS)*time.Second)
 	if err != nil {
 		s.logger.Warn("gateway_request_timeout", "correlation_id", correlationID, "session_id", sessionID, "elapsed_ms", time.Since(publishStart).Milliseconds())
@@ -258,6 +266,7 @@ func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.R
 		Input:     inputItems,
 		Output:    outputItems,
 		SessionID: sessionID,
+		SpeakerID: speakerID,
 		Model:     model,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		Status:    response.StatusCompleted,
@@ -291,7 +300,7 @@ func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.R
 	)
 }
 
-func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.ResponseWriter, sessionID, correlationID, model, responseID string, inputItems []response.InputItem, publishStart time.Time) {
+func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.ResponseWriter, sessionID, correlationID, model, responseID string, inputItems []response.InputItem, publishStart time.Time, speakerID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Streaming not supported")
@@ -341,6 +350,7 @@ func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.Resp
 					Input:     inputItems,
 					Output:    outputItems,
 					SessionID: sessionID,
+					SpeakerID: speakerID,
 					Model:     model,
 					CreatedAt: time.Now().UTC().Format(time.RFC3339),
 					Status:    response.StatusCompleted,
@@ -479,11 +489,18 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		messages = []messaging.ChatMsg{}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	speakerID := s.responses.GetSessionSpeakerID(r.Context(), sessionID)
+
+	result := map[string]any{
 		"session_id": sessionID,
 		"messages":   messages,
-	})
+	}
+	if speakerID != "" {
+		result["last_speaker_id"] = speakerID
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {

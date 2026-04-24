@@ -50,6 +50,15 @@ func ResolveMemory(ctx context.Context, store *Store) MemoryConfig {
 	if v := os.Getenv("TAG_TAXONOMY"); v != "" {
 		cfg.TagTaxonomy = v
 	}
+	if v := os.Getenv("PRIMARY_USER_ID"); v != "" {
+		cfg.PrimaryUserID = v
+	}
+	if v := os.Getenv("RECALL_DEFAULT_SPEAKER_SCOPE"); v != "" {
+		cfg.RecallDefaultSpeakerScope = v
+	}
+	if v := os.Getenv("IDENTITY_NAME_DENYLIST"); v != "" {
+		cfg.IdentityNameDenylist = v
+	}
 
 	_ = store.Load(ctx, KeyMemory, &cfg)
 	return cfg
@@ -64,6 +73,16 @@ func ValidProvenance() []string {
 // ValidRecallTypes returns the enum values that RecallDefaultTypes accepts.
 func ValidRecallTypes() []string {
 	return []string{"observation", "world_experience", "all"}
+}
+
+// ValidRecallSpeakerScope returns the enum values for RecallDefaultSpeakerScope.
+func ValidRecallSpeakerScope() []string {
+	return []string{"any", "primary", "explicit"}
+}
+
+// ValidFactTypes returns the enum values for metadata.fact_type.
+func ValidFactTypes() []string {
+	return []string{"person_fact", "world_fact", "context_fact", "procedural_fact"}
 }
 
 func ResolveBroker(ctx context.Context, store *Store) BrokerConfig {

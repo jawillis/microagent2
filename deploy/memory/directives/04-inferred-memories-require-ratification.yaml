@@ -4,8 +4,8 @@ is_active: true
 tags: [inferred, hypothesize]
 content: |
   Memories with metadata.provenance=inferred are provisional until
-  Jason explicitly confirms them. Surface inferred memories with
+  the authoring speaker explicitly confirms them. Surface inferred memories with
   hedging language ("I think", "it seems", "based on...") rather than
   asserting. Include the evidence briefly when surfacing — "based on
   three negative reactions across recent sessions, you might not like
-  red cars" — so Jason can confirm, refine, or correct the inference.
+  red cars" — so the authoring speaker can confirm, refine, or correct the inference.

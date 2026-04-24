@@ -46,7 +46,7 @@ func main() {
 	responses := response.NewStore(client.Redis())
 	mc := memoryclient.New(memoryServiceAddr)
 	assembler := appcontext.NewAssembler(chatCfg.SystemPrompt)
-	mgr := appcontext.NewManager(client, responses, mc, assembler, logger, memCfg.RecallLimit, memCfg.PrewarmLimit)
+	mgr := appcontext.NewManager(client, responses, mc, assembler, logger, memCfg.RecallLimit, memCfg.PrewarmLimit, cfgStore)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

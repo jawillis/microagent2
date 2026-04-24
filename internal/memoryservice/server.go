@@ -43,7 +43,8 @@ type Server struct {
 	logger *slog.Logger
 	mux    *http.ServeMux
 
-	hindsightReachable atomic.Bool
+	hindsightReachable     atomic.Bool
+	unknownSpeakerRetains  atomic.Int64
 }
 
 // New constructs a Server. It does not start sync; call SyncSeed separately at startup.
@@ -65,12 +66,20 @@ func (s *Server) MarkHindsightReachable(ok bool) { s.hindsightReachable.Store(ok
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /status", s.handleStatus)
 	s.mux.HandleFunc("POST /retain", s.handleRetain)
 	s.mux.HandleFunc("POST /recall", s.handleRecall)
 	s.mux.HandleFunc("POST /reflect", s.handleReflect)
 	s.mux.HandleFunc("POST /forget", s.handleForget)
 	s.mux.HandleFunc("POST /hooks/hind/retain", s.handleWebhookRetain)
 	s.mux.HandleFunc("POST /hooks/hind/consolidation", s.handleWebhookConsolidation)
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	_ = r.Body.Close()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"unknown_speaker_retains": s.unknownSpeakerRetains.Load(),
+	})
 }
 
 // --- health ---
@@ -140,12 +149,41 @@ func (s *Server) handleRetain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, ok := req.Metadata["speaker_id"]; !ok {
+		memCfg := s.resolveMemoryConfig(ctx)
+		if memCfg.PrimaryUserID != "" {
+			req.Metadata["speaker_id"] = memCfg.PrimaryUserID
+		} else {
+			req.Metadata["speaker_id"] = "unknown"
+		}
+	}
+	if req.Metadata["speaker_id"] == "unknown" {
+		s.unknownSpeakerRetains.Add(1)
+	}
+
+	if ft, ok := req.Metadata["fact_type"]; ok {
+		if !validFactType(ft) {
+			writeError(w, http.StatusBadRequest, "invalid_fact_type",
+				fmt.Sprintf("metadata.fact_type must be one of person_fact|world_fact|context_fact|procedural_fact; got %q", ft))
+			return
+		}
+	} else {
+		req.Metadata["fact_type"] = inferFactType(req.Content, req.Entities)
+	}
+
 	s.logger.Info("memory_retain_received",
 		"correlation_id", corrID,
 		"bank", s.cfg.BankID,
 		"provenance", req.Metadata["provenance"],
+		"speaker_id", req.Metadata["speaker_id"],
+		"fact_type", req.Metadata["fact_type"],
 		"tag_count", len(req.Tags),
 	)
+
+	var entities []hindsight.EntityInput
+	for _, e := range req.Entities {
+		entities = append(entities, hindsight.EntityInput{Text: e})
+	}
 
 	start := time.Now()
 	hsReq := hindsight.RetainRequest{
@@ -155,6 +193,7 @@ func (s *Server) handleRetain(w http.ResponseWriter, r *http.Request) {
 			Context:           req.Context,
 			Metadata:          req.Metadata,
 			DocumentID:        req.DocumentID,
+			Entities:          entities,
 			Tags:              req.Tags,
 			ObservationScopes: req.ObservationScopes,
 		}},
@@ -203,16 +242,44 @@ func (s *Server) handleRecall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Types) == 0 {
-		// Default from config (runtime-tunable). "observation" surfaces the
-		// synthesized layer; "world_experience" surfaces raw facts; "all"
-		// surfaces both. Caller-provided types always win.
 		req.Types = s.defaultRecallTypes(ctx, corrID)
+	}
+
+	memCfg := s.resolveMemoryConfig(ctx)
+	speakerID := req.SpeakerID
+	if speakerID == "" {
+		switch memCfg.RecallDefaultSpeakerScope {
+		case "primary":
+			speakerID = memCfg.PrimaryUserID
+		case "explicit":
+			writeError(w, http.StatusBadRequest, "speaker_required",
+				"recall_default_speaker_scope is 'explicit' and no speaker_id was provided")
+			return
+		}
+	}
+
+	metaFilter := map[string]string{}
+	if speakerID != "" {
+		metaFilter["speaker_id"] = speakerID
+	}
+	for _, ft := range req.FactTypes {
+		if !validFactType(ft) {
+			writeError(w, http.StatusBadRequest, "invalid_fact_type",
+				fmt.Sprintf("fact_type %q is not valid; must be person_fact|world_fact|context_fact|procedural_fact", ft))
+			return
+		}
+	}
+	if len(req.FactTypes) == 1 {
+		metaFilter["fact_type"] = req.FactTypes[0]
 	}
 
 	s.logger.Info("memory_recall_received",
 		"correlation_id", corrID,
 		"limit", req.Limit,
 		"types", req.Types,
+		"speaker_id", speakerID,
+		"entity_count", len(req.Entities),
+		"fact_type_count", len(req.FactTypes),
 	)
 
 	start := time.Now()
@@ -221,6 +288,10 @@ func (s *Server) handleRecall(w http.ResponseWriter, r *http.Request) {
 		Types:     req.Types,
 		MaxTokens: limitToTokens(req.Limit),
 		Tags:      req.Tags,
+		Entities:  req.Entities,
+	}
+	if len(metaFilter) > 0 {
+		hsReq.Metadata = metaFilter
 	}
 	resp, err := s.hc.Recall(ctx, s.cfg.BankID, hsReq)
 	if err != nil {
@@ -506,6 +577,43 @@ func sameStringSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// --- speaker / fact_type helpers ---
+
+var validFactTypes = map[string]bool{
+	"person_fact":     true,
+	"world_fact":      true,
+	"context_fact":    true,
+	"procedural_fact": true,
+}
+
+func validFactType(ft string) bool { return validFactTypes[ft] }
+
+var timeScuedCues = []string{
+	"yesterday", "today", "tomorrow", "last week", "this week",
+	"last month", "this morning", "tonight", "recently",
+	"just now", "earlier", "later", "ago",
+}
+
+func inferFactType(content string, entities []string) string {
+	lower := strings.ToLower(content)
+	for _, cue := range timeScuedCues {
+		if strings.Contains(lower, cue) {
+			return "context_fact"
+		}
+	}
+	for _, e := range entities {
+		if !strings.HasPrefix(e, "class:") {
+			return "person_fact"
+		}
+	}
+	return "world_fact"
+}
+
+// UnknownSpeakerRetains returns the in-process count of retains with speaker_id="unknown".
+func (s *Server) UnknownSpeakerRetains() int64 {
+	return s.unknownSpeakerRetains.Load()
 }
 
 // --- helpers ---

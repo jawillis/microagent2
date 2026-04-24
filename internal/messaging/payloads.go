@@ -11,6 +11,7 @@ type ChatRequestPayload struct {
 	Messages  []ChatMsg `json:"messages"`
 	Model     string    `json:"model,omitempty"`
 	Stream    bool      `json:"stream"`
+	SpeakerID string    `json:"speaker_id,omitempty"`
 }
 
 type ChatMsg struct {
@@ -125,6 +126,7 @@ type ContextAssembledPayload struct {
 	Messages     []ChatMsg `json:"messages"`
 	TargetAgent  string    `json:"target_agent"`
 	ReplyStream  string    `json:"reply_stream"`
+	SpeakerID    string    `json:"speaker_id,omitempty"`
 }
 
 type LLMRequestPayload struct {

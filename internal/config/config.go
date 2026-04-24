@@ -15,11 +15,14 @@ func DefaultChatConfig() ChatConfig {
 }
 
 type MemoryConfig struct {
-	RecallLimit        int    `json:"recall_limit"`
-	PrewarmLimit       int    `json:"prewarm_limit"`
-	RecallDefaultTypes string `json:"recall_default_types"`
-	DefaultProvenance  string `json:"default_provenance"`
-	TagTaxonomy        string `json:"tag_taxonomy"`
+	RecallLimit              int    `json:"recall_limit"`
+	PrewarmLimit             int    `json:"prewarm_limit"`
+	RecallDefaultTypes       string `json:"recall_default_types"`
+	DefaultProvenance        string `json:"default_provenance"`
+	TagTaxonomy              string `json:"tag_taxonomy"`
+	PrimaryUserID            string `json:"primary_user_id,omitempty"`
+	RecallDefaultSpeakerScope string `json:"recall_default_speaker_scope"`
+	IdentityNameDenylist     string `json:"identity_name_denylist,omitempty"`
 
 	// Deprecated: no longer used after add-memory-panel-contribution.
 	// Hindsight does not expose a caller-controlled recall threshold or
@@ -42,13 +45,17 @@ const DefaultProvenance = "explicit"
 // DefaultTagTaxonomy is the default `tag_taxonomy` comma-separated list.
 const DefaultTagTaxonomy = "identity,preferences,technical,home,ephemera"
 
+// DefaultRecallSpeakerScope controls how recall treats a missing speaker_id filter.
+const DefaultRecallSpeakerScope = "any"
+
 func DefaultMemoryConfig() MemoryConfig {
 	return MemoryConfig{
-		RecallLimit:        5,
-		PrewarmLimit:       3,
-		RecallDefaultTypes: DefaultRecallTypes,
-		DefaultProvenance:  DefaultProvenance,
-		TagTaxonomy:        DefaultTagTaxonomy,
+		RecallLimit:               5,
+		PrewarmLimit:              3,
+		RecallDefaultTypes:        DefaultRecallTypes,
+		DefaultProvenance:         DefaultProvenance,
+		TagTaxonomy:               DefaultTagTaxonomy,
+		RecallDefaultSpeakerScope: DefaultRecallSpeakerScope,
 	}
 }
 

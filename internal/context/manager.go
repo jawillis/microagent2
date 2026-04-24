@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"microagent2/internal/config"
 	"microagent2/internal/memoryclient"
 	"microagent2/internal/messaging"
 	"microagent2/internal/response"
@@ -19,9 +20,10 @@ type Manager struct {
 	logger       *slog.Logger
 	recallLimit  int
 	prewarmLimit int
+	cfgStore     *config.Store
 }
 
-func NewManager(client *messaging.Client, responses *response.Store, memory *memoryclient.Client, assembler *Assembler, logger *slog.Logger, recallLimit, prewarmLimit int) *Manager {
+func NewManager(client *messaging.Client, responses *response.Store, memory *memoryclient.Client, assembler *Assembler, logger *slog.Logger, recallLimit, prewarmLimit int, cfgStore *config.Store) *Manager {
 	return &Manager{
 		client:       client,
 		responses:    responses,
@@ -30,6 +32,7 @@ func NewManager(client *messaging.Client, responses *response.Store, memory *mem
 		logger:       logger,
 		recallLimit:  recallLimit,
 		prewarmLimit: prewarmLimit,
+		cfgStore:     cfgStore,
 	}
 }
 
@@ -94,21 +97,46 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	go func() {
 		start := time.Now()
 		ctx := memoryclient.WithCorrelationID(ctx, correlationID)
-		resp, err := m.memory.Recall(ctx, memoryclient.RecallRequest{
+
+		var memCfg config.MemoryConfig
+		_ = m.cfgStore.Load(ctx, config.KeyMemory, &memCfg)
+
+		recallReq := memoryclient.RecallRequest{
 			Query: userMsg.Content,
 			Limit: m.recallLimit,
-		})
+		}
+
+		switch memCfg.RecallDefaultSpeakerScope {
+		case "primary":
+			if payload.SpeakerID != "" && payload.SpeakerID != "unknown" {
+				recallReq.SpeakerID = payload.SpeakerID
+			} else if memCfg.PrimaryUserID != "" {
+				recallReq.SpeakerID = memCfg.PrimaryUserID
+			}
+		case "explicit":
+			if payload.SpeakerID == "" || payload.SpeakerID == "unknown" {
+				m.logger.Warn("context_recall_skipped_no_speaker",
+					"correlation_id", correlationID,
+					"session_id", payload.SessionID,
+				)
+				memCh <- memoryResult{elapsed: time.Since(start)}
+				return
+			}
+			recallReq.SpeakerID = payload.SpeakerID
+		}
+
+		resp, err := m.memory.Recall(ctx, recallReq)
 		if err != nil {
 			memCh <- memoryResult{err: err, elapsed: time.Since(start)}
 			return
 		}
 		memories := make([]Memory, 0, len(resp.Memories))
-		for _, m := range resp.Memories {
+		for _, ms := range resp.Memories {
 			memories = append(memories, Memory{
-				ID:      m.ID,
-				Content: m.Content,
-				Score:   m.Score,
-				Tags:    m.Tags,
+				ID:      ms.ID,
+				Content: ms.Content,
+				Score:   ms.Score,
+				Tags:    ms.Tags,
 			})
 		}
 		memCh <- memoryResult{memories: memories, elapsed: time.Since(start)}
@@ -152,6 +180,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 
 	contextMsg, err := messaging.NewMessage(messaging.TypeContextAssembled, "context-manager", messaging.ContextAssembledPayload{
 		SessionID:   payload.SessionID,
+		SpeakerID:   payload.SpeakerID,
 		Messages:    assembled,
 		TargetAgent: targetAgent,
 		ReplyStream: replyStream,

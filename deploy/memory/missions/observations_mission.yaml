@@ -1,23 +1,23 @@
 field: observations_mission
 text: |
-  Track durable, specific knowledge about Jason and his environment:
+  Track durable, specific knowledge about the speaker and his environment:
   preferences, identity, relationships, home layout, skills, routines,
   and recurring patterns. Strip ephemeral state (current device readings,
   session chatter, one-off confirmations).
 
   FACET DEFINITIONS — these group facts that should share ONE observation:
 
-  - "Jason's preference for X" is a single facet. X = coffee, music,
-    temperature, food, etc. When Jason states a different preference
+  - "the speaker's preference for X" is a single facet. X = coffee, music,
+    temperature, food, etc. When the speaker states a different preference
     for the same X (e.g. coffee → dark roast, later: coffee → light
     roast), UPDATE the existing preference observation. Do not CREATE
     a second observation for the same X.
 
-  - "Jason owns / has X" is a single facet per X. One observation per
+  - "the speaker owns / has X" is a single facet per X. One observation per
     distinct entity (pet, car, tool). UPDATE when attributes change,
     DELETE when explicitly no longer owned ("I sold the BMW").
 
-  - "Jason's identity / name / household members" is a small set of
+  - "the speaker's identity / name / household members" is a small set of
     facets. UPDATE when corrections arrive.
 
   - Facts with metadata.is_correction=true indicate the user is
@@ -38,8 +38,8 @@ text: |
   - One observation per facet. A person has ONE coffee preference at
     a time, not a history of coffee preferences.
   - UPDATE beats CREATE when an existing observation covers the same
-    subject-attribute pair (e.g. "Jason's coffee preference").
-  - DELETE only for observations that become meaningless (e.g. "Jason
-    is considering getting a dog" after "Jason now has a golden
+    subject-attribute pair (e.g. "the speaker's coffee preference").
+  - DELETE only for observations that become meaningless (e.g. "the speaker
+    is considering getting a dog" after "the speaker now has a golden
     retriever named Baxter" — the "considering" observation is
     superseded by the concrete one).

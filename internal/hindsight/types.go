@@ -51,13 +51,15 @@ type RetainResponse struct {
 
 // RecallRequest is the POST /memories/recall body.
 type RecallRequest struct {
-	Query          string   `json:"query"`
-	Types          []string `json:"types,omitempty"`
-	Budget         string   `json:"budget,omitempty"` // "low" | "mid" | "high"
-	MaxTokens      int      `json:"max_tokens,omitempty"`
-	Trace          bool     `json:"trace,omitempty"`
-	QueryTimestamp string   `json:"query_timestamp,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
+	Query          string            `json:"query"`
+	Types          []string          `json:"types,omitempty"`
+	Budget         string            `json:"budget,omitempty"` // "low" | "mid" | "high"
+	MaxTokens      int               `json:"max_tokens,omitempty"`
+	Trace          bool              `json:"trace,omitempty"`
+	QueryTimestamp string            `json:"query_timestamp,omitempty"`
+	Tags           []string          `json:"tags,omitempty"`
+	Entities       []string          `json:"entities,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
 }
 
 // RecallResult is a single memory or observation returned by recall.

@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuildPanelDescriptor_Valid(t *testing.T) {
-	d := BuildPanelDescriptor("http://localhost:9999", "microagent2")
+	d := BuildPanelDescriptor("http://localhost:9999", "microagent2", "http://memory-service:8083/status")
 	if err := dashboard.ValidateDescriptor(d); err != nil {
 		t.Fatalf("descriptor fails validation: %v", err)
 	}
@@ -17,13 +17,13 @@ func TestBuildPanelDescriptor_Valid(t *testing.T) {
 	if d.Order == nil || *d.Order != 200 {
 		t.Fatalf("order = %v, want 200", d.Order)
 	}
-	if len(d.Sections) != 2 {
-		t.Fatalf("sections = %d, want 2", len(d.Sections))
+	if len(d.Sections) != 3 {
+		t.Fatalf("sections = %d, want 3", len(d.Sections))
 	}
 }
 
 func TestBuildPanelDescriptor_FormHasExpectedFields(t *testing.T) {
-	d := BuildPanelDescriptor("http://localhost:9999", "microagent2")
+	d := BuildPanelDescriptor("http://localhost:9999", "microagent2", "http://memory-service:8083/status")
 	form := d.Sections[0].Form
 	if form == nil {
 		t.Fatal("first section must be form")
@@ -40,7 +40,7 @@ func TestBuildPanelDescriptor_FormHasExpectedFields(t *testing.T) {
 }
 
 func TestBuildPanelDescriptor_BankIDInReadonlyField(t *testing.T) {
-	d := BuildPanelDescriptor("http://localhost:9999", "my-bank")
+	d := BuildPanelDescriptor("http://localhost:9999", "my-bank", "http://memory-service:8083/status")
 	form := d.Sections[0].Form
 	f := form.Fields["memory_bank_id"]
 	if !f.Readonly {
@@ -52,8 +52,8 @@ func TestBuildPanelDescriptor_BankIDInReadonlyField(t *testing.T) {
 }
 
 func TestBuildPanelDescriptor_IframeURLCarriesCP(t *testing.T) {
-	d := BuildPanelDescriptor("http://example.com:9999", "microagent2")
-	iframe := d.Sections[1].Iframe
+	d := BuildPanelDescriptor("http://example.com:9999", "microagent2", "http://memory-service:8083/status")
+	iframe := d.Sections[2].Iframe
 	if iframe == nil {
 		t.Fatal("second section must be iframe")
 	}
@@ -66,7 +66,7 @@ func TestBuildPanelDescriptor_IframeURLCarriesCP(t *testing.T) {
 }
 
 func TestBuildPanelDescriptor_EnumsMatchConfig(t *testing.T) {
-	d := BuildPanelDescriptor("x", "b")
+	d := BuildPanelDescriptor("x", "b", "http://memory-service:8083/status")
 	form := d.Sections[0].Form
 	rt := form.Fields["recall_default_types"]
 	if len(rt.Values) != 3 {

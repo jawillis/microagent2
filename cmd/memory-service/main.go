@@ -77,7 +77,7 @@ func main() {
 		Capabilities:        []string{"memory"},
 		Trigger:             "http",
 		HeartbeatIntervalMS: heartbeatMS,
-		DashboardPanel:      memoryservice.BuildPanelDescriptor(cpURL, bankID),
+		DashboardPanel:      memoryservice.BuildPanelDescriptor(cpURL, bankID, externalURL+"/status"),
 	})
 	if err := agentReg.Register(ctx); err != nil {
 		logger.Error("failed_to_register", "error", err.Error())
@@ -141,6 +141,8 @@ func syncOnce(ctx context.Context, logger *slog.Logger, syncer *memoryservice.Sy
 	if err != nil {
 		return err
 	}
+	denylist := os.Getenv("IDENTITY_NAME_DENYLIST")
+	memoryservice.CheckDenylist(seed, denylist, logger)
 	if err := syncer.Apply(ctx, seed); err != nil {
 		return err
 	}

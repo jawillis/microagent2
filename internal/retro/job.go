@@ -39,6 +39,9 @@ type ExtractedMemory struct {
 	MemoryType   string   `json:"memory_type"`
 	Confidence   float64  `json:"confidence"`
 	IsCorrection bool     `json:"is_correction,omitempty"`
+	SpeakerID    string   `json:"speaker_id,omitempty"`
+	FactType     string   `json:"fact_type,omitempty"`
+	Entities     []string `json:"entities,omitempty"`
 }
 
 // ExtractedSkill is the LLM-extracted shape parsed from the skill-extraction prompt.
@@ -86,7 +89,8 @@ func (j *MemoryExtractionJob) Run(ctx context.Context, sessionID string, cp *Che
 	}
 
 	unprocessed := history[startIdx:]
-	prompt := buildMemoryExtractionPrompt(unprocessed)
+	speakerID := j.responses.GetSessionSpeakerID(ctx, sessionID)
+	prompt := buildMemoryExtractionPrompt(unprocessed, speakerID)
 
 	slotID, err := j.runtime.RequestSlot(ctx)
 	if err != nil {
@@ -177,6 +181,7 @@ func (j *SkillCreationJob) Run(ctx context.Context, sessionID string, cp *Checkp
 	}
 
 	unprocessed := history[startIdx:]
+	speakerID := j.responses.GetSessionSpeakerID(ctx, sessionID)
 	prompt := buildSkillCreationPrompt(unprocessed)
 
 	slotID, err := j.runtime.RequestSlot(ctx)
@@ -216,7 +221,7 @@ func (j *SkillCreationJob) Run(ctx context.Context, sessionID string, cp *Checkp
 			continue
 		}
 
-		req := buildSkillRetainRequest(skill)
+		req := buildSkillRetainRequest(skill, speakerID)
 		if req.Content == "" {
 			continue
 		}
@@ -344,17 +349,18 @@ func buildExtractRetainRequest(mem ExtractedMemory) memoryclient.RetainRequest {
 		// supersede the old claim. See reference_hindsight_tag_scope.md.
 		metadata["is_correction"] = "true"
 	}
+	if mem.SpeakerID != "" {
+		metadata["speaker_id"] = mem.SpeakerID
+	}
+	if mem.FactType != "" {
+		metadata["fact_type"] = mem.FactType
+	}
 	tags := stripCorrectionsTag(uniqueTags(mem.Tags))
 	return memoryclient.RetainRequest{
 		Content:  strings.TrimSpace(mem.Content),
 		Tags:     tags,
 		Metadata: metadata,
-		// observation_scopes omitted → Hindsight default "combined": one
-		// consolidation pass using all tags together. "per_tag" duplicates
-		// the same memory into one observation per tag, which is useful when
-		// topics need independently-decaying observation sets but misleading
-		// when a memory simply spans multiple topics (e.g., a car fact
-		// tagged identity+technical+home).
+		Entities: mem.Entities,
 	}
 }
 
@@ -375,7 +381,7 @@ func stripCorrectionsTag(tags []string) []string {
 // buildSkillRetainRequest turns an ExtractedSkill into a retain request,
 // always tagged "skill" with provenance=implicit (skills are observed patterns,
 // not user-stated).
-func buildSkillRetainRequest(skill ExtractedSkill) memoryclient.RetainRequest {
+func buildSkillRetainRequest(skill ExtractedSkill, speakerID string) memoryclient.RetainRequest {
 	concept := strings.TrimSpace(skill.Concept)
 	if concept == "" {
 		concept = strings.TrimSpace(skill.ProblemClass)
@@ -399,6 +405,9 @@ func buildSkillRetainRequest(skill ExtractedSkill) memoryclient.RetainRequest {
 	if skill.Confidence > 0 && skill.Confidence <= 1.0 {
 		metadata["confidence"] = fmt.Sprintf("%.2f", skill.Confidence)
 	}
+	if speakerID != "" {
+		metadata["speaker_id"] = speakerID
+	}
 	tags := uniqueTags(append([]string{"skill"}, skill.Tags...))
 	return memoryclient.RetainRequest{
 		Content:  strings.Join(parts, "\n"),
@@ -409,8 +418,11 @@ func buildSkillRetainRequest(skill ExtractedSkill) memoryclient.RetainRequest {
 
 // --- prompt builders ---
 
-func buildMemoryExtractionPrompt(history []messaging.ChatMsg) []messaging.ChatMsg {
+func buildMemoryExtractionPrompt(history []messaging.ChatMsg, speakerID string) []messaging.ChatMsg {
 	var sb strings.Builder
+	if speakerID != "" {
+		sb.WriteString(fmt.Sprintf("Speaker ID for this conversation: %s\n\n", speakerID))
+	}
 	for _, msg := range history {
 		sb.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
 	}
@@ -433,6 +445,8 @@ func buildSkillCreationPrompt(history []messaging.ChatMsg) []messaging.ChatMsg {
 
 const extractionPrompt = `You are a memory extraction agent. Analyze the conversation and extract facts, preferences, and contextual information worth remembering long-term.
 
+The conversation may involve one or more speakers. Each extracted memory should be attributed to the speaker who stated or demonstrated it.
+
 Output a JSON array of memory objects. Each object must have:
 
 - "concept": a SPECIFIC headline sentence describing what this memory is about.
@@ -442,6 +456,9 @@ Output a JSON array of memory objects. Each object must have:
 - "is_correction": true when this memory revises or supersedes a prior claim ("actually", "I was wrong", "I changed my mind"); false or omitted otherwise.
 - "memory_type": one of "fact", "decision", "observation", "preference", "issue", "task", "procedure", "event", "goal", "constraint", "identity", "reference". Omit if unsure.
 - "confidence": a float between 0.0 and 1.0 reflecting extraction certainty.
+- "speaker_id": the identifier of the speaker who stated this fact. Use the speaker_id from the conversation context if provided; omit if unknown.
+- "fact_type": one of "person_fact" (about a specific person), "world_fact" (general knowledge), "context_fact" (time-scoped or situational), "procedural_fact" (how-to or process). Omit if unsure.
+- "entities": array of entity names this fact is ABOUT (not the speaker). For example, if the speaker says "Alice likes tea", entities = ["alice"]. Omit if no specific entities.
 
 If nothing is worth storing, output an empty array: []
 

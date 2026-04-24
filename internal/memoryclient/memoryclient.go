@@ -66,6 +66,7 @@ type RetainRequest struct {
 	Timestamp         string            `json:"timestamp,omitempty"`
 	ObservationScopes string            `json:"observation_scopes,omitempty"`
 	DocumentID        string            `json:"document_id,omitempty"`
+	Entities          []string          `json:"entities,omitempty"`
 }
 
 // RetainResponse is memory-service's retain reply.
@@ -78,10 +79,13 @@ type RetainResponse struct {
 
 // RecallRequest asks memory-service for memories matching a query.
 type RecallRequest struct {
-	Query string   `json:"query"`
-	Limit int      `json:"limit,omitempty"`
-	Tags  []string `json:"tags,omitempty"`
-	Types []string `json:"types,omitempty"` // defaults to ["world","experience"] server-side
+	Query     string   `json:"query"`
+	Limit     int      `json:"limit,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
+	Types     []string `json:"types,omitempty"` // defaults to ["world","experience"] server-side
+	SpeakerID string   `json:"speaker_id,omitempty"`
+	Entities  []string `json:"entities,omitempty"`
+	FactTypes []string `json:"fact_types,omitempty"`
 }
 
 // MemorySummary is a consumer-facing memory projection. This is deliberately
