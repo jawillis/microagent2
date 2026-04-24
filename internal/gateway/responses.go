@@ -195,6 +195,7 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 			s.writeStitchIndex(ctx, sessionID, correlationID, inputItems, outputItems)
 		}
 	}
+	s.publishTurnCompleted(ctx, sessionID)
 
 	// Strip server-internal function_call / function_call_output items from the
 	// client-facing response. The client didn't ask for tool calling and the
@@ -348,6 +349,7 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 						s.writeStitchIndex(ctx, sessionID, correlationID, inputItems, outputItems)
 					}
 				}
+				s.publishTurnCompleted(ctx, sessionID)
 
 				doneEvent := responsesResponse{
 					ID:                 responseID,

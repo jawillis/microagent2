@@ -70,6 +70,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// publishTurnCompleted notifies subscribers on channel:events that a turn
+// landed for this session. The retro agent's inactivity trigger arms (and
+// re-arms) its timer on each such event; without these publishes the retro
+// agent only runs on manual /v1/retro/.../trigger calls.
+func (s *Server) publishTurnCompleted(ctx context.Context, sessionID string) {
+	msg, err := messaging.NewMessage(messaging.TypeSessionEvent, "gateway", messaging.SessionEventPayload{
+		SessionID: sessionID,
+		Event:     "turn_completed",
+	})
+	if err != nil {
+		return
+	}
+	if err := s.client.PubSubPublish(ctx, messaging.ChannelEvents, msg); err != nil {
+		s.logger.Warn("session_event_publish_failed", "session_id", sessionID, "error", err.Error())
+	}
+}
+
 type openAIRequest struct {
 	Model     string      `json:"model"`
 	Messages  []openAIMsg `json:"messages"`
@@ -223,6 +240,7 @@ func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.R
 	if err := s.responses.Save(ctx, resp); err != nil {
 		s.logger.Error("failed to store response", "error", err, "response_id", responseID)
 	}
+	s.publishTurnCompleted(ctx, sessionID)
 
 	finish := "stop"
 	chatResp := openAIResponse{
@@ -305,6 +323,7 @@ func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.Resp
 				if err := s.responses.Save(ctx, resp); err != nil {
 					s.logger.Error("failed to store response", "error", err, "response_id", responseID)
 				}
+				s.publishTurnCompleted(ctx, sessionID)
 
 				finish := "stop"
 				chunk := openAIResponse{
