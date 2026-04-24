@@ -23,6 +23,8 @@ services:
     environment:
       - VALKEY_ADDR=valkey:6379
       - GATEWAY_PORT=8080
+      - LLAMA_ADDR=http://${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
+      - MUNINNDB_ADDR=http://${MUNINNDB_ADDR:-host.docker.internal:8100}
     depends_on:
       valkey:
         condition: service_healthy
@@ -99,9 +101,27 @@ services:
     networks:
       - microagent
 
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "${OPEN_WEBUI_PORT:-3000}:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://gateway:8080/v1
+      - OPENAI_API_KEY=none
+      - USE_OLLAMA_DOCKER=false
+      - ANONYMIZED_TELEMETRY=false
+      - DO_NOT_TRACK=true
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - gateway
+    networks:
+      - microagent
+
 networks:
   microagent:
     driver: bridge
 
 volumes:
   valkey-data:
+  open-webui-data:

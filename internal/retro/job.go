@@ -114,20 +114,24 @@ func (j *MemoryExtractionJob) Run(ctx context.Context, sessionID string, cp *Che
 }
 
 type SkillCreationJob struct {
-	runtime    *agent.Runtime
-	sessions   *appcontext.SessionStore
-	muninn     *appcontext.MuninnClient
-	logger     *slog.Logger
-	checkpoint *CheckpointStore
+	runtime           *agent.Runtime
+	sessions          *appcontext.SessionStore
+	muninn            *appcontext.MuninnClient
+	logger            *slog.Logger
+	checkpoint        *CheckpointStore
+	minHistoryTurns   int
+	skillDupThreshold float64
 }
 
-func NewSkillCreationJob(rt *agent.Runtime, sessions *appcontext.SessionStore, muninn *appcontext.MuninnClient, logger *slog.Logger, cp *CheckpointStore) *SkillCreationJob {
+func NewSkillCreationJob(rt *agent.Runtime, sessions *appcontext.SessionStore, muninn *appcontext.MuninnClient, logger *slog.Logger, cp *CheckpointStore, minHistoryTurns int, skillDupThreshold float64) *SkillCreationJob {
 	return &SkillCreationJob{
-		runtime:    rt,
-		sessions:   sessions,
-		muninn:     muninn,
-		logger:     logger,
-		checkpoint: cp,
+		runtime:           rt,
+		sessions:          sessions,
+		muninn:            muninn,
+		logger:            logger,
+		checkpoint:        cp,
+		minHistoryTurns:   minHistoryTurns,
+		skillDupThreshold: skillDupThreshold,
 	}
 }
 
@@ -138,7 +142,7 @@ func (j *SkillCreationJob) Run(ctx context.Context, sessionID string, cp *Checkp
 	if err != nil {
 		return fmt.Errorf("get history: %w", err)
 	}
-	if len(history) < 4 {
+	if len(history) < j.minHistoryTurns {
 		return nil
 	}
 
@@ -178,7 +182,7 @@ func (j *SkillCreationJob) Run(ctx context.Context, sessionID string, cp *Checkp
 
 	for _, skill := range skills {
 		existing, _ := j.muninn.Recall(ctx, skill.ProblemClass, 3)
-		if isDuplicateSkill(skill, existing) {
+		if isDuplicateSkill(skill, existing, j.skillDupThreshold) {
 			j.logger.Debug("skipping duplicate skill", "problem_class", skill.ProblemClass)
 			continue
 		}
@@ -195,25 +199,25 @@ func (j *SkillCreationJob) Run(ctx context.Context, sessionID string, cp *Checkp
 }
 
 type CurationJob struct {
-	runtime *agent.Runtime
-	muninn  *appcontext.MuninnClient
-	logger  *slog.Logger
+	runtime    *agent.Runtime
+	muninn     *appcontext.MuninnClient
+	logger     *slog.Logger
+	categories []string
 }
 
-func NewCurationJob(rt *agent.Runtime, muninn *appcontext.MuninnClient, logger *slog.Logger) *CurationJob {
+func NewCurationJob(rt *agent.Runtime, muninn *appcontext.MuninnClient, logger *slog.Logger, categories []string) *CurationJob {
 	return &CurationJob{
-		runtime: rt,
-		muninn:  muninn,
-		logger:  logger,
+		runtime:    rt,
+		muninn:     muninn,
+		logger:     logger,
+		categories: categories,
 	}
 }
 
 func (j *CurationJob) Type() JobType { return JobCuration }
 
 func (j *CurationJob) Run(ctx context.Context, sessionID string, _ *Checkpoint) error {
-	categories := []string{"preference", "fact", "context", "skill"}
-
-	for _, category := range categories {
+	for _, category := range j.categories {
 		entries, err := j.muninn.Recall(ctx, category, 50)
 		if err != nil {
 			j.logger.Warn("failed to recall entries for curation", "category", category, "error", err)
@@ -375,9 +379,9 @@ func trimJSONFences(s string) string {
 	return s
 }
 
-func isDuplicateSkill(skill ExtractedSkill, existing []appcontext.Memory) bool {
+func isDuplicateSkill(skill ExtractedSkill, existing []appcontext.Memory, threshold float64) bool {
 	for _, mem := range existing {
-		if mem.Score > 0.85 && strings.Contains(strings.ToLower(mem.Content), strings.ToLower(skill.ProblemClass)) {
+		if mem.Score > threshold && strings.Contains(strings.ToLower(mem.Content), strings.ToLower(skill.ProblemClass)) {
 			return true
 		}
 	}

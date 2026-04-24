@@ -10,20 +10,24 @@ import (
 )
 
 type Manager struct {
-	client    *messaging.Client
-	sessions  *SessionStore
-	muninn    *MuninnClient
-	assembler *Assembler
-	logger    *slog.Logger
+	client       *messaging.Client
+	sessions     *SessionStore
+	muninn       *MuninnClient
+	assembler    *Assembler
+	logger       *slog.Logger
+	recallLimit  int
+	prewarmLimit int
 }
 
-func NewManager(client *messaging.Client, sessions *SessionStore, muninn *MuninnClient, assembler *Assembler, logger *slog.Logger) *Manager {
+func NewManager(client *messaging.Client, sessions *SessionStore, muninn *MuninnClient, assembler *Assembler, logger *slog.Logger, recallLimit, prewarmLimit int) *Manager {
 	return &Manager{
-		client:    client,
-		sessions:  sessions,
-		muninn:    muninn,
-		assembler: assembler,
-		logger:    logger,
+		client:       client,
+		sessions:     sessions,
+		muninn:       muninn,
+		assembler:    assembler,
+		logger:       logger,
+		recallLimit:  recallLimit,
+		prewarmLimit: prewarmLimit,
 	}
 }
 
@@ -81,7 +85,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	}()
 
 	go func() {
-		mem, err := m.muninn.Recall(ctx, userMsg.Content, 5)
+		mem, err := m.muninn.Recall(ctx, userMsg.Content, m.recallLimit)
 		memCh <- memoryResult{mem, err}
 	}()
 
@@ -140,7 +144,7 @@ func (m *Manager) preWarmMemories(ctx context.Context, sessionID string) {
 		return
 	}
 
-	_, err = m.muninn.Recall(ctx, lastAssistant, 3)
+	_, err = m.muninn.Recall(ctx, lastAssistant, m.prewarmLimit)
 	if err != nil {
 		m.logger.Debug("pre-warm memory fetch failed", "error", err)
 	}

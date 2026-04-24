@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"microagent2/internal/config"
+	appcontext "microagent2/internal/context"
 	"microagent2/internal/gateway"
 	"microagent2/internal/messaging"
 )
@@ -17,6 +19,8 @@ func main() {
 
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
 	port := envOr("GATEWAY_PORT", "8080")
+	llamaAddr := envOr("LLAMA_ADDR", "http://localhost:8081")
+	muninnAddr := envOr("MUNINNDB_ADDR", "http://localhost:8100")
 
 	client := messaging.NewClient(valkeyAddr)
 	defer client.Close()
@@ -29,7 +33,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := gateway.New(client, logger)
+	cfgStore := config.NewStore(client.Redis())
+	chatCfg := config.ResolveChat(ctx, cfgStore)
+	logger.Info("config resolved", "model", chatCfg.Model, "request_timeout_s", chatCfg.RequestTimeoutS)
+
+	sessions := appcontext.NewSessionStore(client.Redis())
+	srv := gateway.New(client, logger, cfgStore, sessions, chatCfg.RequestTimeoutS, port, llamaAddr, muninnAddr)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

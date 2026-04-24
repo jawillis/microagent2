@@ -63,14 +63,14 @@ func TestEndToEnd(t *testing.T) {
 
 	// Set up broker
 	reg := registry.NewRegistry()
-	b := broker.New(client, reg, testLogger, llamaAddr, "", 4, 5*time.Second)
+	b := broker.New(client, reg, testLogger, llamaAddr, "", "test", 4, 5*time.Second)
 	go b.Run(ctx)
 
 	// Set up context manager
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, "")
+	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
-	mgr := appcontext.NewManager(client, sessions, muninn, assembler, testLogger)
+	mgr := appcontext.NewManager(client, sessions, muninn, assembler, testLogger, 5, 3)
 	go mgr.Run(ctx)
 
 	// Register main agent
@@ -138,7 +138,7 @@ func TestEndToEnd(t *testing.T) {
 	}()
 
 	// Send request through gateway
-	gw := gateway.New(client, testLogger)
+	gw := gateway.New(client, testLogger, nil, sessions, 120, "8080", "http://localhost:8081", "http://localhost:8100")
 	reqBody := `{"model":"test","messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -245,7 +245,7 @@ func TestPreemptionFlow(t *testing.T) {
 	}))
 	defer llamaServer.Close()
 
-	b := broker.New(client, reg, testLogger, strings.TrimPrefix(llamaServer.URL, "http://"), "", 2, 2*time.Second)
+	b := broker.New(client, reg, testLogger, strings.TrimPrefix(llamaServer.URL, "http://"), "", "test", 2, 2*time.Second)
 	go b.Run(ctx)
 
 	time.Sleep(300 * time.Millisecond)
@@ -386,7 +386,7 @@ func TestMemoryInjection(t *testing.T) {
 	muninnAddr := strings.TrimPrefix(muninnServer.URL, "http://")
 
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, "")
+	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
 
 	// Store session history

@@ -1,0 +1,251 @@
+(function () {
+  "use strict";
+
+  // --- Panel switching ---
+  document.querySelectorAll(".tab").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll(".tab").forEach(function (b) { b.classList.remove("active"); });
+      document.querySelectorAll(".panel").forEach(function (p) { p.classList.remove("active"); });
+      btn.classList.add("active");
+      document.getElementById("panel-" + btn.dataset.panel).classList.add("active");
+      if (btn.dataset.panel === "sessions") loadSessions();
+      if (btn.dataset.panel === "system") loadStatus();
+      if (btn.dataset.panel === "agents") { loadStatus(); loadConfig(); }
+    });
+  });
+
+  // --- API helpers ---
+  function api(method, path, body) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(path, opts).then(function (r) {
+      if (!r.ok) return r.json().then(function (e) { throw new Error(e.error ? e.error.message : r.statusText); });
+      return r.json();
+    });
+  }
+
+  function showStatus(id, ok, msg) {
+    var el = document.getElementById(id);
+    el.textContent = msg;
+    el.className = "save-status " + (ok ? "ok" : "err");
+    setTimeout(function () { el.textContent = ""; }, 3000);
+  }
+
+  // --- Config load/save ---
+  function loadConfig() {
+    api("GET", "/v1/config").then(function (cfg) {
+      // Chat
+      setVal("chat-system_prompt", cfg.chat.system_prompt);
+      setVal("chat-model", cfg.chat.model);
+      setVal("chat-request_timeout_s", cfg.chat.request_timeout_s);
+      // Memory
+      setVal("memory-recall_limit", cfg.memory.recall_limit);
+      setVal("memory-recall_threshold", cfg.memory.recall_threshold);
+      setVal("memory-max_hops", cfg.memory.max_hops);
+      setVal("memory-prewarm_limit", cfg.memory.prewarm_limit);
+      setVal("memory-vault", cfg.memory.vault);
+      setVal("memory-store_confidence", cfg.memory.store_confidence);
+      // Broker
+      setVal("broker-slot_count", cfg.broker.slot_count);
+      setVal("broker-preempt_timeout_ms", cfg.broker.preempt_timeout_ms);
+      // Retro
+      setVal("retro-inactivity_timeout_s", cfg.retro.inactivity_timeout_s);
+      setVal("retro-skill_dup_threshold", cfg.retro.skill_dup_threshold);
+      setVal("retro-min_history_turns", cfg.retro.min_history_turns);
+      setVal("retro-curation_categories", (cfg.retro.curation_categories || []).join(", "));
+    });
+  }
+
+  function setVal(id, val) {
+    var el = document.getElementById(id);
+    if (el) el.value = val != null ? val : "";
+  }
+  function getVal(id) { return document.getElementById(id).value; }
+  function getNum(id) { return Number(document.getElementById(id).value); }
+
+  function saveSection(section, values, statusId) {
+    api("PUT", "/v1/config", { section: section, values: values })
+      .then(function () { showStatus(statusId, true, "Saved"); })
+      .catch(function (e) { showStatus(statusId, false, e.message); });
+  }
+
+  document.getElementById("chat-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    saveSection("chat", {
+      system_prompt: getVal("chat-system_prompt"),
+      model: getVal("chat-model"),
+      request_timeout_s: getNum("chat-request_timeout_s")
+    }, "chat-status");
+  });
+
+  document.getElementById("memory-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    saveSection("memory", {
+      recall_limit: getNum("memory-recall_limit"),
+      recall_threshold: getNum("memory-recall_threshold"),
+      max_hops: getNum("memory-max_hops"),
+      prewarm_limit: getNum("memory-prewarm_limit"),
+      vault: getVal("memory-vault"),
+      store_confidence: getNum("memory-store_confidence")
+    }, "memory-status");
+  });
+
+  document.getElementById("broker-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    saveSection("broker", {
+      slot_count: getNum("broker-slot_count"),
+      preempt_timeout_ms: getNum("broker-preempt_timeout_ms")
+    }, "broker-status");
+  });
+
+  document.getElementById("retro-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var cats = getVal("retro-curation_categories").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    saveSection("retro", {
+      inactivity_timeout_s: getNum("retro-inactivity_timeout_s"),
+      skill_dup_threshold: getNum("retro-skill_dup_threshold"),
+      min_history_turns: getNum("retro-min_history_turns"),
+      curation_categories: cats
+    }, "retro-status");
+  });
+
+  // --- Sessions ---
+  function loadSessions() {
+    api("GET", "/v1/sessions").then(function (sessions) {
+      var tbody = document.querySelector("#sessions-table tbody");
+      tbody.innerHTML = "";
+      sessions.forEach(function (s) {
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td>" + esc(s.session_id) + "</td>" +
+          "<td>" + s.turn_count + "</td>" +
+          "<td></td>";
+        var actions = tr.querySelector("td:last-child");
+
+        var viewBtn = document.createElement("button");
+        viewBtn.className = "action-btn";
+        viewBtn.textContent = "View";
+        viewBtn.addEventListener("click", function () { viewSession(s.session_id); });
+        actions.appendChild(viewBtn);
+
+        var delBtn = document.createElement("button");
+        delBtn.className = "action-btn danger";
+        delBtn.textContent = "Delete";
+        delBtn.addEventListener("click", function () { deleteSession(s.session_id); });
+        actions.appendChild(delBtn);
+
+        var sel = document.createElement("select");
+        sel.className = "retro-select";
+        ["memory_extraction", "skill_creation", "curation"].forEach(function (jt) {
+          var opt = document.createElement("option");
+          opt.value = jt;
+          opt.textContent = jt;
+          sel.appendChild(opt);
+        });
+        actions.appendChild(sel);
+
+        var trigBtn = document.createElement("button");
+        trigBtn.className = "action-btn";
+        trigBtn.textContent = "Trigger";
+        trigBtn.addEventListener("click", function () { triggerRetro(s.session_id, sel.value); });
+        actions.appendChild(trigBtn);
+
+        tbody.appendChild(tr);
+      });
+    });
+  }
+
+  function viewSession(id) {
+    api("GET", "/v1/sessions/" + encodeURIComponent(id)).then(function (data) {
+      var container = document.getElementById("session-messages");
+      container.innerHTML = "";
+      (data.messages || []).forEach(function (m) {
+        var div = document.createElement("div");
+        div.className = "msg";
+        div.innerHTML = '<div class="msg-role ' + esc(m.role) + '">' + esc(m.role) + '</div>' +
+                        '<div class="msg-content">' + esc(m.content) + '</div>';
+        container.appendChild(div);
+      });
+      document.getElementById("session-detail").classList.remove("hidden");
+    });
+  }
+
+  document.getElementById("close-detail").addEventListener("click", function () {
+    document.getElementById("session-detail").classList.add("hidden");
+  });
+
+  function deleteSession(id) {
+    if (!confirm("Delete session " + id + "?")) return;
+    api("DELETE", "/v1/sessions/" + encodeURIComponent(id))
+      .then(function () { loadSessions(); })
+      .catch(function (e) { alert(e.message); });
+  }
+
+  function triggerRetro(sessionId, jobType) {
+    api("POST", "/v1/retro/" + encodeURIComponent(sessionId) + "/trigger", { job_type: jobType })
+      .then(function () { alert("Retro job triggered: " + jobType); })
+      .catch(function (e) { alert(e.message); });
+  }
+
+  // --- System Status ---
+  function loadStatus() {
+    api("GET", "/v1/status").then(function (data) {
+      // Health indicators
+      var container = document.getElementById("health-indicators");
+      container.innerHTML = "";
+      (data.services || []).forEach(function (svc) {
+        var card = document.createElement("div");
+        card.className = "health-card";
+        card.innerHTML = '<span class="health-dot ' + svc.status + '"></span>' +
+                         '<span>' + esc(svc.name) + '</span>' +
+                         (svc.message ? '<span class="health-msg">' + esc(svc.message) + '</span>' : '');
+        container.appendChild(card);
+      });
+
+      // System info
+      var dl = document.getElementById("system-info");
+      dl.innerHTML = "";
+      if (data.system) {
+        addDL(dl, "Gateway Port", data.system.gateway_port);
+        addDL(dl, "llama.cpp Address", data.system.llama_addr);
+        addDL(dl, "MuninnDB Address", data.system.muninn_addr);
+      }
+
+      // Agents table (on agents panel)
+      var tbody = document.querySelector("#agents-table tbody");
+      tbody.innerHTML = "";
+      (data.agents || []).forEach(function (a) {
+        var tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td>" + esc(a.agent_id) + "</td>" +
+          "<td>" + a.priority + "</td>" +
+          "<td>" + (a.preemptible ? "Yes" : "No") + "</td>" +
+          "<td>" + esc((a.capabilities || []).join(", ")) + "</td>" +
+          "<td>" + esc(a.trigger) + "</td>";
+        tbody.appendChild(tr);
+      });
+    });
+  }
+
+  function addDL(dl, term, def) {
+    var dt = document.createElement("dt");
+    dt.textContent = term;
+    dl.appendChild(dt);
+    var dd = document.createElement("dd");
+    dd.textContent = def || "—";
+    dl.appendChild(dd);
+  }
+
+  function esc(s) {
+    if (s == null) return "";
+    var d = document.createElement("div");
+    d.textContent = String(s);
+    return d.innerHTML;
+  }
+
+  // Initial load
+  loadConfig();
+})();

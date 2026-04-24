@@ -18,16 +18,24 @@ type Memory struct {
 }
 
 type MuninnClient struct {
-	addr       string
-	apiKey     string
-	httpClient *http.Client
+	addr            string
+	apiKey          string
+	httpClient      *http.Client
+	vault           string
+	recallThreshold float64
+	maxHops         int
+	storeConfidence float64
 }
 
-func NewMuninnClient(addr, apiKey string) *MuninnClient {
+func NewMuninnClient(addr, apiKey string, vault string, recallThreshold float64, maxHops int, storeConfidence float64) *MuninnClient {
 	return &MuninnClient{
-		addr:       addr,
-		apiKey:     apiKey,
-		httpClient: &http.Client{},
+		addr:            addr,
+		apiKey:          apiKey,
+		httpClient:      &http.Client{},
+		vault:           vault,
+		recallThreshold: recallThreshold,
+		maxHops:         maxHops,
+		storeConfidence: storeConfidence,
 	}
 }
 
@@ -54,11 +62,11 @@ func (m *MuninnClient) Recall(ctx context.Context, query string, limit int) ([]M
 	url := fmt.Sprintf("http://%s/api/activate", m.addr)
 
 	body, err := json.Marshal(activateRequest{
-		Vault:      "default",
+		Vault:      m.vault,
 		Context:    []string{query},
 		MaxResults: limit,
-		Threshold:  0.5,
-		MaxHops:    2,
+		Threshold:  m.recallThreshold,
+		MaxHops:    m.maxHops,
 	})
 	if err != nil {
 		return nil, err
@@ -114,11 +122,11 @@ func (m *MuninnClient) Store(ctx context.Context, content, category string, keyT
 	url := fmt.Sprintf("http://%s/api/engrams", m.addr)
 
 	body, err := json.Marshal(engramRequest{
-		Vault:      "default",
+		Vault:      m.vault,
 		Concept:    category,
 		Content:    content,
 		Tags:       keyTerms,
-		Confidence: 0.9,
+		Confidence: m.storeConfidence,
 	})
 	if err != nil {
 		return err

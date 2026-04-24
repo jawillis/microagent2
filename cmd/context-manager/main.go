@@ -8,6 +8,7 @@ import (
 
 	gocontext "context"
 
+	"microagent2/internal/config"
 	appcontext "microagent2/internal/context"
 	"microagent2/internal/messaging"
 )
@@ -18,7 +19,6 @@ func main() {
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
 	muninnAddr := envOr("MUNINNDB_ADDR", "localhost:8100")
 	muninnAPIKey := envOr("MUNINNDB_API_KEY", "")
-	systemPrompt := envOr("SYSTEM_PROMPT", "You are a helpful assistant.")
 
 	client := messaging.NewClient(valkeyAddr)
 	defer client.Close()
@@ -31,10 +31,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	cfgStore := config.NewStore(client.Redis())
+	chatCfg := config.ResolveChat(ctx, cfgStore)
+	memCfg := config.ResolveMemory(ctx, cfgStore)
+
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey)
-	assembler := appcontext.NewAssembler(systemPrompt)
-	mgr := appcontext.NewManager(client, sessions, muninn, assembler, logger)
+	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey, memCfg.Vault, memCfg.RecallThreshold, memCfg.MaxHops, memCfg.StoreConfidence)
+	assembler := appcontext.NewAssembler(chatCfg.SystemPrompt)
+	mgr := appcontext.NewManager(client, sessions, muninn, assembler, logger, memCfg.RecallLimit, memCfg.PrewarmLimit)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

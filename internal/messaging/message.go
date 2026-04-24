@@ -25,6 +25,7 @@ const (
 	TypeTokenDone       MessageType = "token_done"
 	TypeSessionEvent    MessageType = "session_event"
 	TypeContextAssembled MessageType = "context_assembled"
+	TypeRetroTrigger     MessageType = "retro_trigger"
 )
 
 type Message struct {

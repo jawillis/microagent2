@@ -11,6 +11,7 @@ import (
 	gocontext "context"
 
 	"microagent2/internal/agent"
+	"microagent2/internal/config"
 	appcontext "microagent2/internal/context"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
@@ -26,7 +27,6 @@ func main() {
 	agentID := envOr("AGENT_ID", "retro-agent")
 	priority := envInt("AGENT_PRIORITY", 1)
 	heartbeatMS := envInt("HEARTBEAT_INTERVAL_MS", 3000)
-	inactivityTimeoutS := envInt("INACTIVITY_TIMEOUT_S", 300)
 
 	client := messaging.NewClient(valkeyAddr)
 	defer client.Close()
@@ -38,6 +38,10 @@ func main() {
 		logger.Error("failed to connect to Valkey", "error", err)
 		os.Exit(1)
 	}
+
+	cfgStore := config.NewStore(client.Redis())
+	retroCfg := config.ResolveRetro(ctx, cfgStore)
+	memCfg := config.ResolveMemory(ctx, cfgStore)
 
 	reg := registry.NewAgentRegistrar(client, messaging.RegisterPayload{
 		AgentID:             agentID,
@@ -58,36 +62,91 @@ func main() {
 
 	rt := agent.NewRuntime(client, agentID, priority, true, logger)
 	sessions := appcontext.NewSessionStore(client.Redis())
-	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey)
+	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey, memCfg.Vault, memCfg.RecallThreshold, memCfg.MaxHops, memCfg.StoreConfidence)
 	checkpoints := retro.NewCheckpointStore(client.Redis())
 
 	memJob := retro.NewMemoryExtractionJob(rt, sessions, muninn, logger, checkpoints)
-	skillJob := retro.NewSkillCreationJob(rt, sessions, muninn, logger, checkpoints)
-	curationJob := retro.NewCurationJob(rt, muninn, logger)
+	skillJob := retro.NewSkillCreationJob(rt, sessions, muninn, logger, checkpoints, retroCfg.MinHistoryTurns, retroCfg.SkillDupThreshold)
+	curationJob := retro.NewCurationJob(rt, muninn, logger, retroCfg.CurationCategories)
 
-	dispatch := func(sessionID string) {
-		logger.Info("retro jobs triggered", "session", sessionID)
-
-		cp := checkpoints.Load(sessionID, memJob.Type())
-		if err := memJob.Run(ctx, sessionID, cp); err != nil && err != messaging.ErrPreempted {
-			logger.Error("memory extraction failed", "session", sessionID, "error", err)
+	runJob := func(sessionID string, job retro.Job, cp *retro.Checkpoint) {
+		acquired, err := retro.AcquireLock(ctx, client.Redis(), sessionID, job.Type())
+		if err != nil {
+			logger.Error("failed to acquire retro lock", "session", sessionID, "job", job.Type(), "error", err)
+			return
 		}
-
-		cp = checkpoints.Load(sessionID, skillJob.Type())
-		if err := skillJob.Run(ctx, sessionID, cp); err != nil && err != messaging.ErrPreempted {
-			logger.Error("skill creation failed", "session", sessionID, "error", err)
+		if !acquired {
+			logger.Info("retro job already locked, skipping", "session", sessionID, "job", job.Type())
+			return
 		}
+		defer retro.ReleaseLock(ctx, client.Redis(), sessionID, job.Type())
 
-		if err := curationJob.Run(ctx, sessionID, nil); err != nil && err != messaging.ErrPreempted {
-			logger.Error("curation failed", "session", sessionID, "error", err)
+		if err := job.Run(ctx, sessionID, cp); err != nil && err != messaging.ErrPreempted {
+			logger.Error("retro job failed", "session", sessionID, "job", job.Type(), "error", err)
 		}
 	}
 
-	inactivityTimeout := time.Duration(inactivityTimeoutS) * time.Second
+	dispatch := func(sessionID string) {
+		logger.Info("retro jobs triggered", "session", sessionID)
+		runJob(sessionID, memJob, checkpoints.Load(sessionID, memJob.Type()))
+		runJob(sessionID, skillJob, checkpoints.Load(sessionID, skillJob.Type()))
+		runJob(sessionID, curationJob, nil)
+	}
+
+	jobs := map[string]retro.Job{
+		"memory_extraction": memJob,
+		"skill_creation":    skillJob,
+		"curation":          curationJob,
+	}
+
+	dispatchSingle := func(sessionID, jobType string) {
+		job, ok := jobs[jobType]
+		if !ok {
+			logger.Warn("unknown retro job type from trigger", "job_type", jobType)
+			return
+		}
+		var cp *retro.Checkpoint
+		if jobType != "curation" {
+			cp = checkpoints.Load(sessionID, job.Type())
+		}
+		logger.Info("retro job externally triggered", "session", sessionID, "job", jobType)
+		job.Run(ctx, sessionID, cp)
+		retro.ReleaseLock(ctx, client.Redis(), sessionID, job.Type())
+	}
+
+	inactivityTimeout := time.Duration(retroCfg.InactivityTimeoutS) * time.Second
 	trigger := retro.NewTrigger(client, logger, inactivityTimeout, dispatch)
 
 	go trigger.RunInactivityTrigger(ctx)
 	go trigger.RunSessionEndTrigger(ctx)
+
+	if err := client.EnsureGroup(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro); err != nil {
+		logger.Error("failed to create retro trigger consumer group", "error", err)
+		os.Exit(1)
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			msgs, ids, err := client.ReadGroup(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro, agentID, 1, time.Second)
+			if err != nil {
+				continue
+			}
+			for i, msg := range msgs {
+				var payload messaging.RetroTriggerPayload
+				if err := msg.DecodePayload(&payload); err != nil {
+					logger.Warn("invalid retro trigger payload", "error", err)
+					_ = client.Ack(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro, ids[i])
+					continue
+				}
+				dispatchSingle(payload.SessionID, payload.JobType)
+				_ = client.Ack(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro, ids[i])
+			}
+		}
+	}()
 
 	go handleSignals(ctx, cancel, reg, rt, logger)
 

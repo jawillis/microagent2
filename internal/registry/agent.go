@@ -2,10 +2,12 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"microagent2/internal/messaging"
 )
 
@@ -39,8 +41,14 @@ func (r *AgentRegistrar) Register(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.client.Publish(ctx, messaging.StreamRegistryAnnounce, msg)
-	return err
+	if _, err := r.client.Publish(ctx, messaging.StreamRegistryAnnounce, msg); err != nil {
+		return err
+	}
+	data, err := json.Marshal(r.info)
+	if err != nil {
+		return err
+	}
+	return r.client.Redis().Set(ctx, agentKey(r.agentID), data, 0).Err()
 }
 
 func (r *AgentRegistrar) Deregister(ctx context.Context) error {
@@ -49,8 +57,10 @@ func (r *AgentRegistrar) Deregister(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.client.Publish(ctx, messaging.StreamRegistryAnnounce, msg)
-	return err
+	if _, err := r.client.Publish(ctx, messaging.StreamRegistryAnnounce, msg); err != nil {
+		return err
+	}
+	return r.client.Redis().Del(ctx, agentKey(r.agentID)).Err()
 }
 
 func (r *AgentRegistrar) RunHeartbeat(ctx context.Context) {
@@ -71,6 +81,40 @@ func (r *AgentRegistrar) RunHeartbeat(ctx context.Context) {
 			_ = r.client.PubSubPublish(ctx, channel, msg)
 		}
 	}
+}
+
+func agentKey(agentID string) string {
+	return fmt.Sprintf("agent:%s", agentID)
+}
+
+func ListRegistered(ctx context.Context, rdb interface {
+	Scan(ctx context.Context, cursor uint64, match string, count int64) *redis.ScanCmd
+	Get(ctx context.Context, key string) *redis.StringCmd
+}) ([]messaging.RegisterPayload, error) {
+	var agents []messaging.RegisterPayload
+	var cursor uint64
+	for {
+		keys, next, err := rdb.Scan(ctx, cursor, "agent:*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			data, err := rdb.Get(ctx, key).Bytes()
+			if err != nil {
+				continue
+			}
+			var info messaging.RegisterPayload
+			if err := json.Unmarshal(data, &info); err != nil {
+				continue
+			}
+			agents = append(agents, info)
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return agents, nil
 }
 
 type Registry struct {

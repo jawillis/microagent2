@@ -14,4 +14,7 @@ const (
 	ConsumerGroupContextManager = "cg:context-manager"
 	ConsumerGroupBroker         = "cg:broker"
 	ConsumerGroupAgent          = "cg:agent:%s"
+
+	StreamRetroTriggers = "stream:retro:triggers"
+	ConsumerGroupRetro  = "cg:retro"
 )

@@ -25,6 +25,7 @@ type Broker struct {
 	logger         *slog.Logger
 	llamaAddr      string
 	llamaAPIKey    string
+	model          string
 	preemptTimeout time.Duration
 
 	mu             sync.Mutex
@@ -38,7 +39,7 @@ type slotRequest struct {
 	replyStream   string
 }
 
-func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr, llamaAPIKey string, slotCount int, preemptTimeout time.Duration) *Broker {
+func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr, llamaAPIKey, model string, slotCount int, preemptTimeout time.Duration) *Broker {
 	b := &Broker{
 		client:         client,
 		slots:          NewSlotTable(slotCount),
@@ -46,6 +47,7 @@ func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, 
 		logger:         logger,
 		llamaAddr:      llamaAddr,
 		llamaAPIKey:    llamaAPIKey,
+		model:          model,
 		preemptTimeout: preemptTimeout,
 	}
 
@@ -328,7 +330,7 @@ func (b *Broker) ProxyLLMRequest(ctx context.Context, slotID int, messages []mes
 		url := fmt.Sprintf("http://%s/v1/chat/completions", b.llamaAddr)
 
 		reqBody, err := json.Marshal(chatCompletionRequest{
-			Model:    "default",
+			Model:    b.model,
 			Messages: messages,
 			Stream:   stream,
 		})

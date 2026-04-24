@@ -72,3 +72,8 @@ type LLMRequestPayload struct {
 	Messages []ChatMsg `json:"messages"`
 	Stream   bool      `json:"stream"`
 }
+
+type RetroTriggerPayload struct {
+	SessionID string `json:"session_id"`
+	JobType   string `json:"job_type"`
+}

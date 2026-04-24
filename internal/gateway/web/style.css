@@ -1,0 +1,51 @@
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#1a1a2e;--surface:#16213e;--surface2:#0f3460;--accent:#e94560;--text:#eee;--text-muted:#aaa;--ok:#4ecca3;--err:#e94560;--border:#2a2a4a;--radius:6px}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+header{background:var(--surface);padding:1rem 2rem;display:flex;align-items:center;gap:2rem;border-bottom:1px solid var(--border)}
+header h1{font-size:1.2rem;font-weight:600;white-space:nowrap}
+nav{display:flex;gap:0.5rem;flex-wrap:wrap}
+.tab{background:transparent;border:1px solid var(--border);color:var(--text-muted);padding:0.4rem 1rem;border-radius:var(--radius);cursor:pointer;font-size:0.9rem;transition:all .15s}
+.tab:hover{border-color:var(--accent);color:var(--text)}
+.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+main{max-width:900px;margin:2rem auto;padding:0 1.5rem}
+.panel{display:none}
+.panel.active{display:block}
+h2{margin-bottom:1.5rem;font-size:1.3rem;font-weight:500}
+h3{margin:1.5rem 0 0.75rem;font-size:1.1rem;font-weight:500;color:var(--text-muted)}
+label{display:flex;flex-direction:column;gap:0.3rem;font-size:0.85rem;color:var(--text-muted)}
+input,textarea,select{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:0.5rem 0.75rem;border-radius:var(--radius);font-size:0.9rem;width:100%}
+input:focus,textarea:focus{outline:none;border-color:var(--accent)}
+textarea{resize:vertical;font-family:monospace}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem}
+.save-btn{background:var(--accent);border:none;color:#fff;padding:0.5rem 1.5rem;border-radius:var(--radius);cursor:pointer;font-size:0.9rem;margin-top:1rem;transition:opacity .15s}
+.save-btn:hover{opacity:0.85}
+.save-status{font-size:0.85rem;margin-left:0.75rem;vertical-align:middle}
+.save-status.ok{color:var(--ok)}
+.save-status.err{color:var(--err)}
+table{width:100%;border-collapse:collapse;margin-bottom:1rem}
+th,td{text-align:left;padding:0.6rem 0.75rem;border-bottom:1px solid var(--border);font-size:0.85rem}
+th{color:var(--text-muted);font-weight:500;text-transform:uppercase;font-size:0.75rem;letter-spacing:0.05em}
+tbody tr:hover{background:var(--surface)}
+.action-btn{background:transparent;border:1px solid var(--border);color:var(--text-muted);padding:0.25rem 0.6rem;border-radius:var(--radius);cursor:pointer;font-size:0.8rem;margin-right:0.3rem;transition:all .15s}
+.action-btn:hover{border-color:var(--accent);color:var(--text)}
+.action-btn.danger:hover{border-color:var(--err);color:var(--err)}
+.hidden{display:none !important}
+#session-detail{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;margin-top:1rem;max-height:500px;overflow-y:auto}
+#session-detail h3{margin-top:0;display:flex;justify-content:space-between;align-items:center}
+.close-btn{background:transparent;border:none;color:var(--text-muted);font-size:1.2rem;cursor:pointer}
+.msg{padding:0.5rem 0;border-bottom:1px solid var(--border)}
+.msg:last-child{border-bottom:none}
+.msg-role{font-weight:600;font-size:0.8rem;text-transform:uppercase;margin-bottom:0.2rem}
+.msg-role.user{color:var(--accent)}
+.msg-role.assistant{color:var(--ok)}
+.msg-role.system{color:var(--text-muted)}
+.msg-content{font-size:0.9rem;white-space:pre-wrap;word-break:break-word}
+.health-card{display:inline-flex;align-items:center;gap:0.5rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:0.5rem 1rem;margin:0.25rem;font-size:0.9rem}
+.health-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.health-dot.healthy{background:var(--ok)}
+.health-dot.unhealthy{background:var(--err)}
+.health-msg{color:var(--text-muted);font-size:0.8rem}
+dl{display:grid;grid-template-columns:auto 1fr;gap:0.3rem 1rem;font-size:0.9rem}
+dt{color:var(--text-muted);font-weight:500}
+dd{color:var(--text)}
+.retro-select{width:auto;display:inline;margin-right:0.3rem;padding:0.2rem 0.4rem;font-size:0.8rem}

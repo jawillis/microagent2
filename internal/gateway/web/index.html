@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>microagent2 Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>microagent2</h1>
+    <nav>
+      <button class="tab active" data-panel="chat">Chat</button>
+      <button class="tab" data-panel="memory">Memory</button>
+      <button class="tab" data-panel="agents">Agents</button>
+      <button class="tab" data-panel="sessions">Sessions</button>
+      <button class="tab" data-panel="system">System</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="panel-chat" class="panel active">
+      <h2>Chat Configuration</h2>
+      <form id="chat-form">
+        <label>
+          System Prompt
+          <textarea id="chat-system_prompt" rows="6"></textarea>
+        </label>
+        <label>
+          Model
+          <input type="text" id="chat-model">
+        </label>
+        <label>
+          Request Timeout (seconds)
+          <input type="number" id="chat-request_timeout_s" min="1">
+        </label>
+        <button type="submit" class="save-btn">Save Chat Config</button>
+        <span class="save-status" id="chat-status"></span>
+      </form>
+    </section>
+
+    <section id="panel-memory" class="panel">
+      <h2>Memory Configuration</h2>
+      <form id="memory-form">
+        <div class="form-grid">
+          <label>
+            Recall Limit
+            <input type="number" id="memory-recall_limit" min="1">
+          </label>
+          <label>
+            Recall Threshold
+            <input type="number" id="memory-recall_threshold" min="0" max="1" step="0.01">
+          </label>
+          <label>
+            Max Hops
+            <input type="number" id="memory-max_hops" min="0">
+          </label>
+          <label>
+            Prewarm Limit
+            <input type="number" id="memory-prewarm_limit" min="0">
+          </label>
+          <label>
+            Vault
+            <input type="text" id="memory-vault">
+          </label>
+          <label>
+            Store Confidence
+            <input type="number" id="memory-store_confidence" min="0" max="1" step="0.01">
+          </label>
+        </div>
+        <button type="submit" class="save-btn">Save Memory Config</button>
+        <span class="save-status" id="memory-status"></span>
+      </form>
+    </section>
+
+    <section id="panel-agents" class="panel">
+      <h2>Agents &amp; Broker</h2>
+
+      <h3>Broker Settings</h3>
+      <form id="broker-form">
+        <div class="form-grid">
+          <label>
+            Slot Count
+            <input type="number" id="broker-slot_count" min="1">
+          </label>
+          <label>
+            Preempt Timeout (ms)
+            <input type="number" id="broker-preempt_timeout_ms" min="0">
+          </label>
+        </div>
+        <button type="submit" class="save-btn">Save Broker Config</button>
+        <span class="save-status" id="broker-status"></span>
+      </form>
+
+      <h3>Registered Agents</h3>
+      <table id="agents-table">
+        <thead>
+          <tr>
+            <th>Agent ID</th>
+            <th>Priority</th>
+            <th>Preemptible</th>
+            <th>Capabilities</th>
+            <th>Trigger</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <h3>Retro Policy</h3>
+      <form id="retro-form">
+        <div class="form-grid">
+          <label>
+            Inactivity Timeout (seconds)
+            <input type="number" id="retro-inactivity_timeout_s" min="1">
+          </label>
+          <label>
+            Skill Duplicate Threshold
+            <input type="number" id="retro-skill_dup_threshold" min="0" max="1" step="0.01">
+          </label>
+          <label>
+            Min History Turns
+            <input type="number" id="retro-min_history_turns" min="1">
+          </label>
+          <label>
+            Curation Categories (comma-separated)
+            <input type="text" id="retro-curation_categories">
+          </label>
+        </div>
+        <button type="submit" class="save-btn">Save Retro Config</button>
+        <span class="save-status" id="retro-status"></span>
+      </form>
+    </section>
+
+    <section id="panel-sessions" class="panel">
+      <h2>Sessions</h2>
+      <table id="sessions-table">
+        <thead>
+          <tr>
+            <th>Session ID</th>
+            <th>Turns</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <div id="session-detail" class="hidden">
+        <h3>Session History <button id="close-detail" class="close-btn">&times;</button></h3>
+        <div id="session-messages"></div>
+      </div>
+    </section>
+
+    <section id="panel-system" class="panel">
+      <h2>System Status</h2>
+      <div id="health-indicators"></div>
+      <h3>Infrastructure</h3>
+      <dl id="system-info"></dl>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

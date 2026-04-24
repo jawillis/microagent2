@@ -4,13 +4,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
 	gocontext "context"
 
 	"microagent2/internal/broker"
+	"microagent2/internal/config"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
 )
@@ -21,8 +21,6 @@ func main() {
 	valkeyAddr := envOr("VALKEY_ADDR", "localhost:6379")
 	llamaAddr := envOr("LLAMA_SERVER_ADDR", "localhost:8081")
 	llamaAPIKey := envOr("LLAMA_API_KEY", "")
-	slotCount := envInt("SLOT_COUNT", 4)
-	preemptTimeoutMS := envInt("PREEMPT_TIMEOUT_MS", 5000)
 
 	client := messaging.NewClient(valkeyAddr)
 	defer client.Close()
@@ -35,9 +33,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	cfgStore := config.NewStore(client.Redis())
+	brokerCfg := config.ResolveBroker(ctx, cfgStore)
+	chatCfg := config.ResolveChat(ctx, cfgStore)
+
 	reg := registry.NewRegistry()
-	preemptTimeout := time.Duration(preemptTimeoutMS) * time.Millisecond
-	b := broker.New(client, reg, logger, llamaAddr, llamaAPIKey, slotCount, preemptTimeout)
+	preemptTimeout := time.Duration(brokerCfg.PreemptTimeoutMS) * time.Millisecond
+	b := broker.New(client, reg, logger, llamaAddr, llamaAPIKey, chatCfg.Model, brokerCfg.SlotCount, preemptTimeout)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -47,7 +49,7 @@ func main() {
 		cancel()
 	}()
 
-	logger.Info("llm broker ready", "slots", slotCount, "llama_addr", llamaAddr)
+	logger.Info("llm broker ready", "slots", brokerCfg.SlotCount, "llama_addr", llamaAddr)
 	if err := b.Run(ctx); err != nil && err != gocontext.Canceled {
 		logger.Error("broker error", "error", err)
 		os.Exit(1)
@@ -61,14 +63,3 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func envInt(key string, fallback int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return fallback
-	}
-	return n
-}
