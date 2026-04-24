@@ -60,29 +60,14 @@ func main() {
 	group := fmt.Sprintf(messaging.ConsumerGroupAgent, agentID)
 	consumer := "worker"
 
-	if err := client.EnsureGroup(ctx, stream, group); err != nil {
-		logger.Error("failed to ensure consumer group", "error", err)
-		os.Exit(1)
-	}
-
 	logger.Info("main agent ready, consuming requests")
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		msgs, ids, err := client.ReadGroup(ctx, stream, group, consumer, 1, 2*time.Second)
-		if err != nil {
-			continue
-		}
-
-		for i, msg := range msgs {
+	if err := client.ConsumeStream(ctx, stream, group, consumer, 1, 2*time.Second,
+		func(ctx context.Context, msg *messaging.Message) error {
 			handleRequest(ctx, client, rt, msg, logger)
-			_ = client.Ack(ctx, stream, group, ids[i])
-		}
+			return nil
+		}, logger, nil); err != nil && err != context.Canceled {
+		logger.Error("consume stream exited", "error", err)
 	}
 }
 

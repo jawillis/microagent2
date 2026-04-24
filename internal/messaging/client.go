@@ -67,6 +67,9 @@ func (c *Client) ReadGroup(ctx context.Context, stream, group, consumer string, 
 		for _, m := range r.Messages {
 			msg, decErr := DecodeFromStream(m.Values)
 			if decErr != nil {
+				// Ack the undecodable message so it doesn't stall the group.
+				// We can't retry a message we can't even decode.
+				_ = c.Ack(ctx, stream, group, m.ID)
 				continue
 			}
 			msgs = append(msgs, msg)

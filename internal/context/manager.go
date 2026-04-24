@@ -35,28 +35,11 @@ func NewManager(client *messaging.Client, responses *response.Store, muninn *Mun
 func (m *Manager) Run(ctx context.Context) error {
 	group := messaging.ConsumerGroupContextManager
 	consumer := "context-worker"
-
-	if err := m.client.EnsureGroup(ctx, messaging.StreamGatewayRequests, group); err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		msgs, ids, err := m.client.ReadGroup(ctx, messaging.StreamGatewayRequests, group, consumer, 10, 2*time.Second)
-		if err != nil {
-			continue
-		}
-
-		for i, msg := range msgs {
+	return m.client.ConsumeStream(ctx, messaging.StreamGatewayRequests, group, consumer, 10, 2*time.Second,
+		func(ctx context.Context, msg *messaging.Message) error {
 			m.handleRequest(ctx, msg)
-			_ = m.client.Ack(ctx, messaging.StreamGatewayRequests, group, ids[i])
-		}
-	}
+			return nil
+		}, m.logger, nil)
 }
 
 func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
@@ -65,7 +48,6 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 			m.logger.Error("context_handle_request_panic", "correlation_id", msg.CorrelationID, "panic", fmt.Sprint(r))
 		}
 	}()
-	m.logger.Info("context_handle_request_start", "correlation_id", msg.CorrelationID, "type", msg.Type)
 	var payload messaging.ChatRequestPayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		m.logger.Error("failed to decode chat request", "error", err)

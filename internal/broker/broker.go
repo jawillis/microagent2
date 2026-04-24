@@ -91,28 +91,11 @@ func (b *Broker) consumeSlotRequests(ctx context.Context) error {
 	stream := "stream:broker:slot-requests"
 	group := messaging.ConsumerGroupBroker
 	consumer := "slot-arbiter"
-
-	if err := b.client.EnsureGroup(ctx, stream, group); err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		msgs, ids, err := b.client.ReadGroup(ctx, stream, group, consumer, 10, 2*time.Second)
-		if err != nil {
-			continue
-		}
-
-		for i, msg := range msgs {
+	return b.client.ConsumeStream(ctx, stream, group, consumer, 10, 2*time.Second,
+		func(ctx context.Context, msg *messaging.Message) error {
 			b.handleMessage(ctx, msg)
-			_ = b.client.Ack(ctx, stream, group, ids[i])
-		}
-	}
+			return nil
+		}, b.logger, nil)
 }
 
 func (b *Broker) handleMessage(ctx context.Context, msg *messaging.Message) {
@@ -320,28 +303,11 @@ func (b *Broker) consumeLLMRequests(ctx context.Context) error {
 	stream := "stream:broker:llm-requests"
 	group := "cg:llm-broker"
 	consumer := "llm-proxy"
-
-	if err := b.client.EnsureGroup(ctx, stream, group); err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		msgs, ids, err := b.client.ReadGroup(ctx, stream, group, consumer, 10, 2*time.Second)
-		if err != nil {
-			continue
-		}
-
-		for i, msg := range msgs {
+	return b.client.ConsumeStream(ctx, stream, group, consumer, 10, 2*time.Second,
+		func(ctx context.Context, msg *messaging.Message) error {
 			b.handleLLMRequest(ctx, msg)
-			_ = b.client.Ack(ctx, stream, group, ids[i])
-		}
-	}
+			return nil
+		}, b.logger, nil)
 }
 
 func (b *Broker) handleLLMRequest(ctx context.Context, msg *messaging.Message) {

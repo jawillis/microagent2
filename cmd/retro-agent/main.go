@@ -121,32 +121,17 @@ func main() {
 	go trigger.RunInactivityTrigger(ctx)
 	go trigger.RunSessionEndTrigger(ctx)
 
-	if err := client.EnsureGroup(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro); err != nil {
-		logger.Error("failed to create retro trigger consumer group", "error", err)
-		os.Exit(1)
-	}
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			msgs, ids, err := client.ReadGroup(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro, agentID, 1, time.Second)
-			if err != nil {
-				continue
-			}
-			for i, msg := range msgs {
+		_ = client.ConsumeStream(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro, agentID, 1, time.Second,
+			func(ctx gocontext.Context, msg *messaging.Message) error {
 				var payload messaging.RetroTriggerPayload
 				if err := msg.DecodePayload(&payload); err != nil {
 					logger.Warn("invalid retro trigger payload", "error", err)
-					_ = client.Ack(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro, ids[i])
-					continue
+					return nil // ack; can't retry a mal-decoded payload
 				}
 				dispatchSingle(payload.SessionID, payload.JobType)
-				_ = client.Ack(ctx, messaging.StreamRetroTriggers, messaging.ConsumerGroupRetro, ids[i])
-			}
-		}
+				return nil
+			}, logger, nil)
 	}()
 
 	go handleSignals(ctx, cancel, reg, rt, logger)
