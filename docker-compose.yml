@@ -93,16 +93,21 @@ services:
       context: .
       dockerfile: deploy/Dockerfile.memory-service
     environment:
+      - VALKEY_ADDR=valkey:6379
       - HINDSIGHT_ADDR=http://hindsight:8888
       - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY:-}
       - HINDSIGHT_WEBHOOK_SECRET=${HINDSIGHT_WEBHOOK_SECRET:?HINDSIGHT_WEBHOOK_SECRET must be set}
       - MEMORY_BANK_ID=${MEMORY_BANK_ID:-microagent2}
       - MEMORY_SERVICE_HTTP_ADDR=:8083
       - MEMORY_SERVICE_EXTERNAL_URL=http://memory-service:8083
+      - MEMORY_SERVICE_CP_URL=${MEMORY_SERVICE_CP_URL:-http://localhost:${HINDSIGHT_CP_PORT:-9999}}
       - MEMORY_YAML_DIR=/etc/microagent2/memory
+      - HEARTBEAT_INTERVAL_MS=${HEARTBEAT_INTERVAL_MS:-3000}
     depends_on:
       hindsight:
         condition: service_started
+      valkey:
+        condition: service_healthy
     networks:
       - microagent
 

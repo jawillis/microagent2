@@ -14,16 +14,24 @@ import (
 	"sync/atomic"
 	"time"
 
+	"microagent2/internal/config"
 	"microagent2/internal/hindsight"
 	"microagent2/internal/memoryclient"
 )
 
-// Config holds env-driven runtime configuration.
+// Config holds env-driven runtime configuration. Resolver is invoked
+// per request to pick up runtime-tunable settings from Valkey without
+// requiring a service restart.
 type Config struct {
 	BankID         string
 	ExternalURL    string // advertised to Hindsight in webhook registrations
 	WebhookSecret  string
 	DefaultTimeout time.Duration
+
+	// Resolver returns the current memory-service tunables. Expected to
+	// be a thin wrapper over config.ResolveMemory so dashboard edits
+	// take effect without restart. If nil, defaults are used.
+	Resolver func(ctx context.Context) config.MemoryConfig
 }
 
 // Server is the memory-service HTTP handler. Policy (provenance defaulting,
@@ -116,12 +124,15 @@ func (s *Server) handleRetain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "content is required")
 		return
 	}
-	// Provenance defaulting + validation.
+	// Provenance defaulting + validation. Default comes from the config
+	// resolver so operators can change it via the dashboard without
+	// requiring a service restart. An invalid config value falls back to
+	// "explicit" with a WARN log.
 	if req.Metadata == nil {
 		req.Metadata = map[string]string{}
 	}
 	if _, ok := req.Metadata["provenance"]; !ok {
-		req.Metadata["provenance"] = "explicit"
+		req.Metadata["provenance"] = s.defaultProvenance(ctx, corrID)
 	}
 	if !validProvenance[req.Metadata["provenance"]] {
 		writeError(w, http.StatusBadRequest, "invalid_provenance",
@@ -192,10 +203,10 @@ func (s *Server) handleRecall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Types) == 0 {
-		// Default to the observation layer: consolidated, deduplicated, and
-		// aligned with Hindsight's intended consumption pattern. Callers
-		// that need raw facts pass types: ["world","experience"] explicitly.
-		req.Types = []string{"observation"}
+		// Default from config (runtime-tunable). "observation" surfaces the
+		// synthesized layer; "world_experience" surfaces raw facts; "all"
+		// surfaces both. Caller-provided types always win.
+		req.Types = s.defaultRecallTypes(ctx, corrID)
 	}
 
 	s.logger.Info("memory_recall_received",
@@ -524,4 +535,53 @@ func corrIDFromReq(r *http.Request) string {
 		return id
 	}
 	return ""
+}
+
+// resolveMemoryConfig returns the current memory config, preferring the
+// injected resolver (runtime-tunable via Valkey) and falling back to
+// hardcoded defaults when no resolver is configured.
+func (s *Server) resolveMemoryConfig(ctx context.Context) config.MemoryConfig {
+	if s.cfg.Resolver != nil {
+		return s.cfg.Resolver(ctx)
+	}
+	return config.DefaultMemoryConfig()
+}
+
+// defaultProvenance returns the provenance value to use when a /retain
+// request omits metadata.provenance. An invalid configured value falls
+// back to "explicit" with a WARN log so a misconfiguration doesn't
+// reject writes.
+func (s *Server) defaultProvenance(ctx context.Context, corrID string) string {
+	p := s.resolveMemoryConfig(ctx).DefaultProvenance
+	if validProvenance[p] {
+		return p
+	}
+	s.logger.Warn("memory_default_provenance_invalid",
+		"correlation_id", corrID,
+		"configured_value", p,
+		"fallback", config.DefaultProvenance,
+	)
+	return config.DefaultProvenance
+}
+
+// defaultRecallTypes maps the config's enum value ("observation" |
+// "world_experience" | "all") to the Hindsight `types` list. An
+// unrecognized value falls back to "observation".
+func (s *Server) defaultRecallTypes(ctx context.Context, corrID string) []string {
+	v := s.resolveMemoryConfig(ctx).RecallDefaultTypes
+	switch v {
+	case "", "observation":
+		return []string{"observation"}
+	case "world_experience":
+		return []string{"world", "experience"}
+	case "all":
+		return []string{"observation", "world", "experience"}
+	default:
+		s.logger.Warn("memory_default_recall_types_invalid",
+			"correlation_id", corrID,
+			"configured_value", v,
+			"fallback", "observation",
+		)
+		return []string{"observation"}
+	}
 }

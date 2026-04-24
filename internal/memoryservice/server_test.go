@@ -13,9 +13,21 @@ import (
 	"strings"
 	"testing"
 
+	"microagent2/internal/config"
 	"microagent2/internal/hindsight"
 	"microagent2/internal/memoryclient"
 )
+
+func testServerWithResolver(t *testing.T, fh *fakeHindsight, cfg config.MemoryConfig) *Server {
+	t.Helper()
+	hc := hindsight.New(fh.URL, "")
+	return New(hc, Config{
+		BankID: "microagent2",
+		Resolver: func(ctx context.Context) config.MemoryConfig {
+			return cfg
+		},
+	}, discardLogger())
+}
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -343,3 +355,90 @@ func TestWebhookMissingSignature(t *testing.T) {
 
 // Compile-time check: context use doesn't leak on shutdown.
 var _ context.Context = context.Background()
+
+// --- resolver-driven defaults ---
+
+func TestRetain_DefaultProvenanceFromResolver(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{DefaultProvenance: "implicit"})
+	body, _ := json.Marshal(memoryclient.RetainRequest{Content: "hi"})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["provenance"]; got != "implicit" {
+		t.Fatalf("provenance = %q; want implicit from resolver", got)
+	}
+}
+
+func TestRetain_InvalidConfigProvenanceFallsBack(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{DefaultProvenance: "bogus"})
+	body, _ := json.Marshal(memoryclient.RetainRequest{Content: "hi"})
+	req := httptest.NewRequest(http.MethodPost, "/retain", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; invalid config should fall back, not reject", rec.Code)
+	}
+	if got := fh.lastRetain.Items[0].Metadata["provenance"]; got != "explicit" {
+		t.Fatalf("fallback = %q; want explicit", got)
+	}
+}
+
+func TestRecall_DefaultTypesFromResolver_WorldExperience(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{RecallDefaultTypes: "world_experience"})
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "x"})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	got := fh.lastRecall.Types
+	if len(got) != 2 || got[0] != "world" || got[1] != "experience" {
+		t.Fatalf("types = %v; want [world experience]", got)
+	}
+}
+
+func TestRecall_DefaultTypesFromResolver_All(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{RecallDefaultTypes: "all"})
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "x"})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	got := fh.lastRecall.Types
+	if len(got) != 3 {
+		t.Fatalf("types = %v; want 3 values", got)
+	}
+}
+
+func TestRecall_InvalidResolverValueFallsBack(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{RecallDefaultTypes: "bogus"})
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "x"})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	got := fh.lastRecall.Types
+	if len(got) != 1 || got[0] != "observation" {
+		t.Fatalf("fallback types = %v; want [observation]", got)
+	}
+}
+
+func TestRecall_CallerTypesOverrideResolver(t *testing.T) {
+	fh := newFakeHindsight(t)
+	s := testServerWithResolver(t, fh, config.MemoryConfig{RecallDefaultTypes: "all"})
+	body, _ := json.Marshal(memoryclient.RecallRequest{Query: "x", Types: []string{"observation"}})
+	req := httptest.NewRequest(http.MethodPost, "/recall", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	got := fh.lastRecall.Types
+	if len(got) != 1 || got[0] != "observation" {
+		t.Fatalf("types = %v; caller should win", got)
+	}
+}

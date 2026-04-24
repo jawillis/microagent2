@@ -74,17 +74,27 @@ func TestResolveMemory_Defaults(t *testing.T) {
 	if cfg.RecallLimit != 5 {
 		t.Errorf("RecallLimit = %d, want 5", cfg.RecallLimit)
 	}
-	if cfg.RecallThreshold != 0.5 {
-		t.Errorf("RecallThreshold = %f, want 0.5", cfg.RecallThreshold)
+	if cfg.PrewarmLimit != 3 {
+		t.Errorf("PrewarmLimit = %d, want 3", cfg.PrewarmLimit)
 	}
-	if cfg.Vault != "default" {
-		t.Errorf("Vault = %q, want %q", cfg.Vault, "default")
+	if cfg.RecallDefaultTypes != DefaultRecallTypes {
+		t.Errorf("RecallDefaultTypes = %q, want %q", cfg.RecallDefaultTypes, DefaultRecallTypes)
+	}
+	if cfg.DefaultProvenance != DefaultProvenance {
+		t.Errorf("DefaultProvenance = %q, want %q", cfg.DefaultProvenance, DefaultProvenance)
+	}
+	if cfg.TagTaxonomy != DefaultTagTaxonomy {
+		t.Errorf("TagTaxonomy = %q, want %q", cfg.TagTaxonomy, DefaultTagTaxonomy)
 	}
 }
 
 func TestResolveMemory_ValkeyOverrides(t *testing.T) {
 	store, mr := testStore(t)
-	data, _ := json.Marshal(map[string]any{"recall_limit": 10, "max_hops": 5})
+	data, _ := json.Marshal(map[string]any{
+		"recall_limit":         10,
+		"recall_default_types": "all",
+		"default_provenance":   "implicit",
+	})
 	mr.Set(KeyMemory, string(data))
 
 	cfg := ResolveMemory(context.Background(), store)
@@ -92,11 +102,38 @@ func TestResolveMemory_ValkeyOverrides(t *testing.T) {
 	if cfg.RecallLimit != 10 {
 		t.Errorf("RecallLimit = %d, want 10", cfg.RecallLimit)
 	}
-	if cfg.MaxHops != 5 {
-		t.Errorf("MaxHops = %d, want 5", cfg.MaxHops)
+	if cfg.RecallDefaultTypes != "all" {
+		t.Errorf("RecallDefaultTypes = %q, want all", cfg.RecallDefaultTypes)
 	}
-	if cfg.RecallThreshold != 0.5 {
-		t.Errorf("RecallThreshold = %f, want 0.5 (default)", cfg.RecallThreshold)
+	if cfg.DefaultProvenance != "implicit" {
+		t.Errorf("DefaultProvenance = %q, want implicit", cfg.DefaultProvenance)
+	}
+	if cfg.PrewarmLimit != 3 {
+		t.Errorf("PrewarmLimit = %d, want 3 (default)", cfg.PrewarmLimit)
+	}
+}
+
+func TestResolveMemory_IgnoresDeprecatedKeys(t *testing.T) {
+	store, mr := testStore(t)
+	// Old keys present in Valkey; Resolve should silently tolerate them.
+	data, _ := json.Marshal(map[string]any{
+		"recall_limit":     7,
+		"vault":            "legacy",
+		"max_hops":         99,
+		"store_confidence": 0.1,
+		"recall_threshold": 0.99,
+	})
+	mr.Set(KeyMemory, string(data))
+
+	cfg := ResolveMemory(context.Background(), store)
+	if cfg.RecallLimit != 7 {
+		t.Errorf("RecallLimit = %d, want 7", cfg.RecallLimit)
+	}
+	// Deprecated fields still populate the struct (for tolerance) but
+	// no code path should consume them. We only verify the non-deprecated
+	// defaults remain correct despite the legacy input.
+	if cfg.RecallDefaultTypes != DefaultRecallTypes {
+		t.Errorf("new default dropped because of legacy payload")
 	}
 }
 

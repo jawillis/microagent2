@@ -38,24 +38,32 @@ func ResolveMemory(ctx context.Context, store *Store) MemoryConfig {
 	if v, err := strconv.Atoi(os.Getenv("RECALL_LIMIT")); err == nil {
 		cfg.RecallLimit = v
 	}
-	if v, err := strconv.ParseFloat(os.Getenv("RECALL_THRESHOLD"), 64); err == nil {
-		cfg.RecallThreshold = v
-	}
-	if v, err := strconv.Atoi(os.Getenv("MAX_HOPS")); err == nil {
-		cfg.MaxHops = v
-	}
 	if v, err := strconv.Atoi(os.Getenv("PREWARM_LIMIT")); err == nil {
 		cfg.PrewarmLimit = v
 	}
-	if v := os.Getenv("VAULT"); v != "" {
-		cfg.Vault = v
+	if v := os.Getenv("RECALL_DEFAULT_TYPES"); v != "" {
+		cfg.RecallDefaultTypes = v
 	}
-	if v, err := strconv.ParseFloat(os.Getenv("STORE_CONFIDENCE"), 64); err == nil {
-		cfg.StoreConfidence = v
+	if v := os.Getenv("DEFAULT_PROVENANCE"); v != "" {
+		cfg.DefaultProvenance = v
+	}
+	if v := os.Getenv("TAG_TAXONOMY"); v != "" {
+		cfg.TagTaxonomy = v
 	}
 
 	_ = store.Load(ctx, KeyMemory, &cfg)
 	return cfg
+}
+
+// ValidProvenance returns the enum values that DefaultProvenance accepts.
+// Used by memory-service to validate dashboard-form input.
+func ValidProvenance() []string {
+	return []string{"explicit", "implicit", "inferred", "researched"}
+}
+
+// ValidRecallTypes returns the enum values that RecallDefaultTypes accepts.
+func ValidRecallTypes() []string {
+	return []string{"observation", "world_experience", "all"}
 }
 
 func ResolveBroker(ctx context.Context, store *Store) BrokerConfig {

@@ -15,22 +15,40 @@ func DefaultChatConfig() ChatConfig {
 }
 
 type MemoryConfig struct {
-	RecallLimit     int     `json:"recall_limit"`
-	RecallThreshold float64 `json:"recall_threshold"`
-	MaxHops         int     `json:"max_hops"`
-	PrewarmLimit    int     `json:"prewarm_limit"`
-	Vault           string  `json:"vault"`
-	StoreConfidence float64 `json:"store_confidence"`
+	RecallLimit        int    `json:"recall_limit"`
+	PrewarmLimit       int    `json:"prewarm_limit"`
+	RecallDefaultTypes string `json:"recall_default_types"`
+	DefaultProvenance  string `json:"default_provenance"`
+	TagTaxonomy        string `json:"tag_taxonomy"`
+
+	// Deprecated: no longer used after add-memory-panel-contribution.
+	// Hindsight does not expose a caller-controlled recall threshold or
+	// graph-traversal depth, and "vault" and "store_confidence" are
+	// muninndb-era concepts that have no Hindsight equivalent. These
+	// fields are retained to tolerate old Valkey values silently during
+	// the migration window; reads ignore them.
+	RecallThreshold float64 `json:"recall_threshold,omitempty"`
+	MaxHops         int     `json:"max_hops,omitempty"`
+	Vault           string  `json:"vault,omitempty"`
+	StoreConfidence float64 `json:"store_confidence,omitempty"`
 }
+
+// DefaultRecallTypes is the default `recall_default_types` value.
+const DefaultRecallTypes = "observation"
+
+// DefaultProvenance is the default `default_provenance` value.
+const DefaultProvenance = "explicit"
+
+// DefaultTagTaxonomy is the default `tag_taxonomy` comma-separated list.
+const DefaultTagTaxonomy = "identity,preferences,technical,home,ephemera"
 
 func DefaultMemoryConfig() MemoryConfig {
 	return MemoryConfig{
-		RecallLimit:     5,
-		RecallThreshold: 0.5,
-		MaxHops:         2,
-		PrewarmLimit:    3,
-		Vault:           "default",
-		StoreConfidence: 0.9,
+		RecallLimit:        5,
+		PrewarmLimit:       3,
+		RecallDefaultTypes: DefaultRecallTypes,
+		DefaultProvenance:  DefaultProvenance,
+		TagTaxonomy:        DefaultTagTaxonomy,
 	}
 }
 
