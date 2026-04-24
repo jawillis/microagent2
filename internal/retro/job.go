@@ -10,6 +10,7 @@ import (
 	"microagent2/internal/agent"
 	appcontext "microagent2/internal/context"
 	"microagent2/internal/messaging"
+	"microagent2/internal/response"
 )
 
 type JobType string
@@ -41,16 +42,16 @@ type ExtractedSkill struct {
 
 type MemoryExtractionJob struct {
 	runtime    *agent.Runtime
-	sessions   *appcontext.SessionStore
+	responses  *response.Store
 	muninn     *appcontext.MuninnClient
 	logger     *slog.Logger
 	checkpoint *CheckpointStore
 }
 
-func NewMemoryExtractionJob(rt *agent.Runtime, sessions *appcontext.SessionStore, muninn *appcontext.MuninnClient, logger *slog.Logger, cp *CheckpointStore) *MemoryExtractionJob {
+func NewMemoryExtractionJob(rt *agent.Runtime, responses *response.Store, muninn *appcontext.MuninnClient, logger *slog.Logger, cp *CheckpointStore) *MemoryExtractionJob {
 	return &MemoryExtractionJob{
 		runtime:    rt,
-		sessions:   sessions,
+		responses:  responses,
 		muninn:     muninn,
 		logger:     logger,
 		checkpoint: cp,
@@ -60,7 +61,7 @@ func NewMemoryExtractionJob(rt *agent.Runtime, sessions *appcontext.SessionStore
 func (j *MemoryExtractionJob) Type() JobType { return JobMemoryExtraction }
 
 func (j *MemoryExtractionJob) Run(ctx context.Context, sessionID string, cp *Checkpoint) error {
-	history, err := j.sessions.GetHistory(ctx, sessionID)
+	history, err := j.responses.GetSessionMessages(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("get history: %w", err)
 	}
@@ -115,7 +116,7 @@ func (j *MemoryExtractionJob) Run(ctx context.Context, sessionID string, cp *Che
 
 type SkillCreationJob struct {
 	runtime           *agent.Runtime
-	sessions          *appcontext.SessionStore
+	responses         *response.Store
 	muninn            *appcontext.MuninnClient
 	logger            *slog.Logger
 	checkpoint        *CheckpointStore
@@ -123,10 +124,10 @@ type SkillCreationJob struct {
 	skillDupThreshold float64
 }
 
-func NewSkillCreationJob(rt *agent.Runtime, sessions *appcontext.SessionStore, muninn *appcontext.MuninnClient, logger *slog.Logger, cp *CheckpointStore, minHistoryTurns int, skillDupThreshold float64) *SkillCreationJob {
+func NewSkillCreationJob(rt *agent.Runtime, responses *response.Store, muninn *appcontext.MuninnClient, logger *slog.Logger, cp *CheckpointStore, minHistoryTurns int, skillDupThreshold float64) *SkillCreationJob {
 	return &SkillCreationJob{
 		runtime:           rt,
-		sessions:          sessions,
+		responses:         responses,
 		muninn:            muninn,
 		logger:            logger,
 		checkpoint:        cp,
@@ -138,7 +139,7 @@ func NewSkillCreationJob(rt *agent.Runtime, sessions *appcontext.SessionStore, m
 func (j *SkillCreationJob) Type() JobType { return JobSkillCreation }
 
 func (j *SkillCreationJob) Run(ctx context.Context, sessionID string, cp *Checkpoint) error {
-	history, err := j.sessions.GetHistory(ctx, sessionID)
+	history, err := j.responses.GetSessionMessages(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("get history: %w", err)
 	}

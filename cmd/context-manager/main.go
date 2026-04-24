@@ -11,6 +11,7 @@ import (
 	"microagent2/internal/config"
 	appcontext "microagent2/internal/context"
 	"microagent2/internal/messaging"
+	"microagent2/internal/response"
 )
 
 func main() {
@@ -35,10 +36,10 @@ func main() {
 	chatCfg := config.ResolveChat(ctx, cfgStore)
 	memCfg := config.ResolveMemory(ctx, cfgStore)
 
-	sessions := appcontext.NewSessionStore(client.Redis())
+	responses := response.NewStore(client.Redis())
 	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey, memCfg.Vault, memCfg.RecallThreshold, memCfg.MaxHops, memCfg.StoreConfidence)
 	assembler := appcontext.NewAssembler(chatCfg.SystemPrompt)
-	mgr := appcontext.NewManager(client, sessions, muninn, assembler, logger, memCfg.RecallLimit, memCfg.PrewarmLimit)
+	mgr := appcontext.NewManager(client, responses, muninn, assembler, logger, memCfg.RecallLimit, memCfg.PrewarmLimit)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

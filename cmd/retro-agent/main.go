@@ -15,6 +15,7 @@ import (
 	appcontext "microagent2/internal/context"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
+	"microagent2/internal/response"
 	"microagent2/internal/retro"
 )
 
@@ -61,12 +62,12 @@ func main() {
 	go reg.RunHeartbeat(ctx)
 
 	rt := agent.NewRuntime(client, agentID, priority, true, logger)
-	sessions := appcontext.NewSessionStore(client.Redis())
+	responses := response.NewStore(client.Redis())
 	muninn := appcontext.NewMuninnClient(muninnAddr, muninnAPIKey, memCfg.Vault, memCfg.RecallThreshold, memCfg.MaxHops, memCfg.StoreConfidence)
 	checkpoints := retro.NewCheckpointStore(client.Redis())
 
-	memJob := retro.NewMemoryExtractionJob(rt, sessions, muninn, logger, checkpoints)
-	skillJob := retro.NewSkillCreationJob(rt, sessions, muninn, logger, checkpoints, retroCfg.MinHistoryTurns, retroCfg.SkillDupThreshold)
+	memJob := retro.NewMemoryExtractionJob(rt, responses, muninn, logger, checkpoints)
+	skillJob := retro.NewSkillCreationJob(rt, responses, muninn, logger, checkpoints, retroCfg.MinHistoryTurns, retroCfg.SkillDupThreshold)
 	curationJob := retro.NewCurationJob(rt, muninn, logger, retroCfg.CurationCategories)
 
 	runJob := func(sessionID string, job retro.Job, cp *retro.Checkpoint) {

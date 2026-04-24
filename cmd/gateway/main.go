@@ -9,9 +9,9 @@ import (
 	"syscall"
 
 	"microagent2/internal/config"
-	appcontext "microagent2/internal/context"
 	"microagent2/internal/gateway"
 	"microagent2/internal/messaging"
+	"microagent2/internal/response"
 )
 
 func main() {
@@ -37,8 +37,8 @@ func main() {
 	chatCfg := config.ResolveChat(ctx, cfgStore)
 	logger.Info("config resolved", "model", chatCfg.Model, "request_timeout_s", chatCfg.RequestTimeoutS)
 
-	sessions := appcontext.NewSessionStore(client.Redis())
-	srv := gateway.New(client, logger, cfgStore, sessions, chatCfg.RequestTimeoutS, port, llamaAddr, muninnAddr)
+	responses := response.NewStore(client.Redis())
+	srv := gateway.New(client, logger, cfgStore, responses, chatCfg.RequestTimeoutS, port, llamaAddr, muninnAddr)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

@@ -20,6 +20,7 @@ import (
 	"microagent2/internal/gateway"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
+	"microagent2/internal/response"
 	"microagent2/internal/retro"
 )
 
@@ -67,10 +68,10 @@ func TestEndToEnd(t *testing.T) {
 	go b.Run(ctx)
 
 	// Set up context manager
-	sessions := appcontext.NewSessionStore(client.Redis())
+	respStore := response.NewStore(client.Redis())
 	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
-	mgr := appcontext.NewManager(client, sessions, muninn, assembler, testLogger, 5, 3)
+	mgr := appcontext.NewManager(client, respStore, muninn, assembler, testLogger, 5, 3)
 	go mgr.Run(ctx)
 
 	// Register main agent
@@ -138,7 +139,8 @@ func TestEndToEnd(t *testing.T) {
 	}()
 
 	// Send request through gateway
-	gw := gateway.New(client, testLogger, nil, sessions, 120, "8080", "http://localhost:8081", "http://localhost:8100")
+	responses := response.NewStore(client.Redis())
+	gw := gateway.New(client, testLogger, nil, responses, 120, "8080", "http://localhost:8081", "http://localhost:8100")
 	reqBody := `{"model":"test","messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -385,14 +387,24 @@ func TestMemoryInjection(t *testing.T) {
 	defer muninnServer.Close()
 	muninnAddr := strings.TrimPrefix(muninnServer.URL, "http://")
 
-	sessions := appcontext.NewSessionStore(client.Redis())
+	respStore := response.NewStore(client.Redis())
 	muninn := appcontext.NewMuninnClient(muninnAddr, "", "default", 0.5, 2, 0.9)
 	assembler := appcontext.NewAssembler("You are a test assistant.")
 
-	// Store session history
+	// Store session history via response objects
 	sessionID := "test-memory-session"
-	_ = sessions.Append(ctx, sessionID, messaging.ChatMsg{Role: "user", Content: "I prefer dark mode"})
-	_ = sessions.Append(ctx, sessionID, messaging.ChatMsg{Role: "assistant", Content: "Noted."})
+	r := &response.Response{
+		ID:        "resp_mem_test",
+		SessionID: sessionID,
+		Input:     []response.InputItem{{Type: "message", Role: "user", Content: "I prefer dark mode"}},
+		Output:    []response.OutputItem{{Type: "message", Role: "assistant", Content: []response.ContentPart{{Type: "output_text", Text: "Noted."}}}},
+		Model:     "test",
+		CreatedAt: "2025-01-01T00:00:00Z",
+		Status:    response.StatusCompleted,
+	}
+	if err := respStore.Save(ctx, r); err != nil {
+		t.Fatalf("save response: %v", err)
+	}
 
 	// Assemble context with memory recall
 	memories, err := muninn.Recall(ctx, "dark mode", 5)
@@ -403,7 +415,7 @@ func TestMemoryInjection(t *testing.T) {
 		t.Fatal("expected memories from mock MuninnDB")
 	}
 
-	history, err := sessions.GetHistory(ctx, sessionID)
+	history, err := respStore.GetSessionMessages(ctx, sessionID)
 	if err != nil {
 		t.Fatalf("get history: %v", err)
 	}

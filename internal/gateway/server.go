@@ -10,13 +10,11 @@ import (
 	"net/http"
 	"time"
 
-	"strings"
-
 	"github.com/google/uuid"
 	"microagent2/internal/config"
-	appcontext "microagent2/internal/context"
 	"microagent2/internal/messaging"
 	"microagent2/internal/registry"
+	"microagent2/internal/response"
 	"microagent2/internal/retro"
 )
 
@@ -28,26 +26,28 @@ type Server struct {
 	logger          *slog.Logger
 	mux             *http.ServeMux
 	configStore     *config.Store
-	sessions        *appcontext.SessionStore
+	responses       *response.Store
 	requestTimeoutS int
 	gatewayPort     string
 	llamaAddr       string
 	muninnAddr      string
 }
 
-func New(client *messaging.Client, logger *slog.Logger, configStore *config.Store, sessions *appcontext.SessionStore, requestTimeoutS int, gatewayPort, llamaAddr, muninnAddr string) *Server {
+func New(client *messaging.Client, logger *slog.Logger, configStore *config.Store, responses *response.Store, requestTimeoutS int, gatewayPort, llamaAddr, muninnAddr string) *Server {
 	s := &Server{
 		client:          client,
 		logger:          logger,
 		mux:             http.NewServeMux(),
 		configStore:     configStore,
-		sessions:        sessions,
+		responses:       responses,
 		requestTimeoutS: requestTimeoutS,
 		gatewayPort:     gatewayPort,
 		llamaAddr:       llamaAddr,
 		muninnAddr:      muninnAddr,
 	}
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
+	s.mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
+	s.mux.HandleFunc("GET /v1/responses/{id}", s.handleGetResponse)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("GET /v1/config", s.handleGetConfig)
 	s.mux.HandleFunc("PUT /v1/config", s.handlePutConfig)
@@ -142,8 +142,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if sessionID == "" {
 		sessionID = uuid.New().String()
 	}
-	correlationID := messaging.NewCorrelationID()
 
+	inputItems := messagesToInputItems(req.Messages)
+
+	correlationID := messaging.NewCorrelationID()
 	msgs := make([]messaging.ChatMsg, len(req.Messages))
 	for i, m := range req.Messages {
 		msgs[i] = messaging.ChatMsg{Role: m.Role, Content: m.Content}
@@ -171,14 +173,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("X-Session-ID", sessionID)
 
+	responseID := response.NewResponseID()
+
 	if req.Stream {
-		s.handleStreaming(r.Context(), w, sessionID, correlationID, req.Model)
+		s.handleChatCompletionsStreaming(r.Context(), w, sessionID, correlationID, req.Model, responseID, inputItems)
 	} else {
-		s.handleNonStreaming(r.Context(), w, replyStream, correlationID, sessionID, req.Model)
+		s.handleChatCompletionsNonStreaming(r.Context(), w, replyStream, correlationID, sessionID, req.Model, responseID, inputItems)
 	}
 }
 
-func (s *Server) handleNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, correlationID, sessionID, model string) {
+func (s *Server) handleChatCompletionsNonStreaming(ctx context.Context, w http.ResponseWriter, replyStream, correlationID, sessionID, model, responseID string, inputItems []response.InputItem) {
 	reply, err := s.client.WaitForReply(ctx, replyStream, correlationID, time.Duration(s.requestTimeoutS)*time.Second)
 	if err != nil {
 		writeError(w, http.StatusGatewayTimeout, "timeout", "Request timed out waiting for response")
@@ -191,8 +195,22 @@ func (s *Server) handleNonStreaming(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 
+	outputItems := textToOutputItems(payload.Content)
+	resp := &response.Response{
+		ID:        responseID,
+		Input:     inputItems,
+		Output:    outputItems,
+		SessionID: sessionID,
+		Model:     model,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Status:    response.StatusCompleted,
+	}
+	if err := s.responses.Save(ctx, resp); err != nil {
+		s.logger.Error("failed to store response", "error", err, "response_id", responseID)
+	}
+
 	finish := "stop"
-	resp := openAIResponse{
+	chatResp := openAIResponse{
 		ID:        "chatcmpl-" + correlationID[:8],
 		Object:    "chat.completion",
 		Created:   time.Now().Unix(),
@@ -206,10 +224,10 @@ func (s *Server) handleNonStreaming(ctx context.Context, w http.ResponseWriter, 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	json.NewEncoder(w).Encode(chatResp)
 }
 
-func (s *Server) handleStreaming(ctx context.Context, w http.ResponseWriter, sessionID, correlationID, model string) {
+func (s *Server) handleChatCompletionsStreaming(ctx context.Context, w http.ResponseWriter, sessionID, correlationID, model, responseID string, inputItems []response.InputItem) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Streaming not supported")
@@ -223,6 +241,8 @@ func (s *Server) handleStreaming(ctx context.Context, w http.ResponseWriter, ses
 	channel := fmt.Sprintf(messaging.ChannelTokens, sessionID)
 	sub := s.client.PubSubSubscribe(ctx, channel)
 	defer sub.Close()
+
+	var fullContent string
 
 	for {
 		select {
@@ -243,6 +263,20 @@ func (s *Server) handleStreaming(ctx context.Context, w http.ResponseWriter, ses
 			}
 
 			if token.Done {
+				outputItems := textToOutputItems(fullContent)
+				resp := &response.Response{
+					ID:        responseID,
+					Input:     inputItems,
+					Output:    outputItems,
+					SessionID: sessionID,
+					Model:     model,
+					CreatedAt: time.Now().UTC().Format(time.RFC3339),
+					Status:    response.StatusCompleted,
+				}
+				if err := s.responses.Save(ctx, resp); err != nil {
+					s.logger.Error("failed to store response", "error", err, "response_id", responseID)
+				}
+
 				finish := "stop"
 				chunk := openAIResponse{
 					ID:      "chatcmpl-" + correlationID[:8],
@@ -261,6 +295,8 @@ func (s *Server) handleStreaming(ctx context.Context, w http.ResponseWriter, ses
 				flusher.Flush()
 				return
 			}
+
+			fullContent += token.Token
 
 			chunk := openAIResponse{
 				ID:      "chatcmpl-" + correlationID[:8],
@@ -331,41 +367,11 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-type sessionSummary struct {
-	SessionID string `json:"session_id"`
-	TurnCount int    `json:"turn_count"`
-}
-
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	var sessions []sessionSummary
-	var cursor uint64
-
-	for {
-		keys, next, err := s.client.Redis().Scan(r.Context(), cursor, "session:*:history", 100).Result()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to scan sessions")
-			return
-		}
-		for _, key := range keys {
-			parts := strings.Split(key, ":")
-			if len(parts) != 3 {
-				continue
-			}
-			sid := parts[1]
-			count, _ := s.client.Redis().LLen(r.Context(), key).Result()
-			sessions = append(sessions, sessionSummary{
-				SessionID: sid,
-				TurnCount: int(count),
-			})
-		}
-		cursor = next
-		if cursor == 0 {
-			break
-		}
-	}
-
-	if sessions == nil {
-		sessions = []sessionSummary{}
+	sessions, err := s.responses.ListSessions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list sessions")
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -375,37 +381,65 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 
-	history, err := s.sessions.GetHistory(r.Context(), sessionID)
+	exists, err := s.responses.SessionExists(r.Context(), sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to check session")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "not_found", "Session not found")
+		return
+	}
+
+	responses, err := s.responses.GetSessionHistory(r.Context(), sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to read session")
 		return
 	}
-	if len(history) == 0 {
-		exists, _ := s.client.Redis().Exists(r.Context(), fmt.Sprintf("session:%s:history", sessionID)).Result()
-		if exists == 0 {
-			writeError(w, http.StatusNotFound, "not_found", "Session not found")
-			return
+
+	var messages []messaging.ChatMsg
+	for _, resp := range responses {
+		messages = append(messages, inputItemsToMessages(resp.Input)...)
+		for _, out := range resp.Output {
+			if out.Type == "message" && out.Role == "assistant" {
+				var text string
+				for _, part := range out.Content {
+					if part.Type == "output_text" || part.Type == "text" {
+						text += part.Text
+					}
+				}
+				if text != "" {
+					messages = append(messages, messaging.ChatMsg{Role: "assistant", Content: text})
+				}
+			}
 		}
+	}
+	if messages == nil {
+		messages = []messaging.ChatMsg{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"session_id": sessionID,
-		"messages":   history,
+		"messages":   messages,
 	})
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	key := fmt.Sprintf("session:%s:history", sessionID)
 
-	deleted, err := s.client.Redis().Del(r.Context(), key).Result()
+	exists, err := s.responses.SessionExists(r.Context(), sessionID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to delete session")
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to check session")
 		return
 	}
-	if deleted == 0 {
+	if !exists {
 		writeError(w, http.StatusNotFound, "not_found", "Session not found")
+		return
+	}
+
+	if err := s.responses.DeleteSession(r.Context(), sessionID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to delete session")
 		return
 	}
 
@@ -438,13 +472,12 @@ func (s *Server) handleRetroTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := fmt.Sprintf("session:%s:history", sessionID)
-	exists, err := s.client.Redis().Exists(r.Context(), key).Result()
+	exists, err := s.responses.SessionExists(r.Context(), sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to check session")
 		return
 	}
-	if exists == 0 {
+	if !exists {
 		writeError(w, http.StatusNotFound, "not_found", "Session not found")
 		return
 	}

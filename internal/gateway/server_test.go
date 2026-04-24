@@ -13,8 +13,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"microagent2/internal/config"
-	appcontext "microagent2/internal/context"
 	"microagent2/internal/messaging"
+	"microagent2/internal/response"
 )
 
 func newTestServer(t *testing.T) (*Server, *miniredis.Miniredis) {
@@ -29,12 +29,12 @@ func newTestServer(t *testing.T) (*Server, *miniredis.Miniredis) {
 	t.Cleanup(func() { rdb.Close() })
 
 	cfgStore := config.NewStore(rdb)
-	sessions := appcontext.NewSessionStore(rdb)
+	responses := response.NewStore(rdb)
 	client := messaging.NewClient(mr.Addr())
 	t.Cleanup(func() { client.Close() })
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	return New(client, logger, cfgStore, sessions, 120, "8080", "http://localhost:8081", "http://localhost:8100"), mr
+	return New(client, logger, cfgStore, responses, 120, "8080", "http://localhost:8081", "http://localhost:8100"), mr
 }
 
 func TestSessionID_ClientProvided(t *testing.T) {
@@ -191,9 +191,8 @@ func TestPutConfig_InvalidSection(t *testing.T) {
 func TestListSessions(t *testing.T) {
 	srv, mr := newTestServer(t)
 
-	mr.Lpush("session:abc:history", `{"role":"user","content":"hello"}`)
-	mr.Lpush("session:def:history", `{"role":"user","content":"hi"}`)
-	mr.Lpush("session:def:history", `{"role":"assistant","content":"hey"}`)
+	seedResponse(t, mr, "resp_001", "abc", "", "user-msg", "assistant-reply")
+	seedResponse(t, mr, "resp_002", "def", "", "hi", "hey")
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
 	w := httptest.NewRecorder()
@@ -203,7 +202,7 @@ func TestListSessions(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var sessions []sessionSummary
+	var sessions []response.SessionSummary
 	if err := json.Unmarshal(w.Body.Bytes(), &sessions); err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +214,7 @@ func TestListSessions(t *testing.T) {
 func TestGetSession_Exists(t *testing.T) {
 	srv, mr := newTestServer(t)
 
-	mr.RPush("session:test-sess:history", `{"role":"user","content":"hello"}`)
-	mr.RPush("session:test-sess:history", `{"role":"assistant","content":"hi there"}`)
+	seedResponse(t, mr, "resp_010", "test-sess", "", "hello", "hi there")
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/test-sess", nil)
 	w := httptest.NewRecorder()
@@ -254,7 +252,7 @@ func TestGetSession_NotFound(t *testing.T) {
 func TestDeleteSession_Exists(t *testing.T) {
 	srv, mr := newTestServer(t)
 
-	mr.RPush("session:del-sess:history", `{"role":"user","content":"bye"}`)
+	seedResponse(t, mr, "resp_del1", "del-sess", "", "bye", "goodbye")
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/del-sess", nil)
 	w := httptest.NewRecorder()
@@ -264,8 +262,11 @@ func TestDeleteSession_Exists(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	if mr.Exists("session:del-sess:history") {
-		t.Error("session key should be deleted")
+	if mr.Exists("session:del-sess:responses") {
+		t.Error("session response list should be deleted")
+	}
+	if mr.Exists("response:resp_del1") {
+		t.Error("response hash should be deleted")
 	}
 }
 
@@ -284,7 +285,7 @@ func TestDeleteSession_NotFound(t *testing.T) {
 func TestRetroTrigger_ValidReturns202(t *testing.T) {
 	srv, mr := newTestServer(t)
 
-	mr.RPush("session:retro-sess:history", `{"role":"user","content":"hi"}`)
+	seedResponse(t, mr, "resp_retro1", "retro-sess", "", "hi", "hey")
 
 	body := `{"job_type":"memory_extraction"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/retro/retro-sess/trigger", strings.NewReader(body))
@@ -308,7 +309,7 @@ func TestRetroTrigger_ValidReturns202(t *testing.T) {
 func TestRetroTrigger_DuplicateReturns409(t *testing.T) {
 	srv, mr := newTestServer(t)
 
-	mr.RPush("session:dup-sess:history", `{"role":"user","content":"hi"}`)
+	seedResponse(t, mr, "resp_dup1", "dup-sess", "", "hi", "hey")
 
 	body := `{"job_type":"skill_creation"}`
 
@@ -334,7 +335,7 @@ func TestRetroTrigger_DuplicateReturns409(t *testing.T) {
 func TestRetroTrigger_InvalidJobTypeReturns400(t *testing.T) {
 	srv, mr := newTestServer(t)
 
-	mr.RPush("session:bad-job:history", `{"role":"user","content":"hi"}`)
+	seedResponse(t, mr, "resp_bad1", "bad-job", "", "hi", "hey")
 
 	body := `{"job_type":"nonexistent_job"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/retro/bad-job/trigger", strings.NewReader(body))
@@ -364,7 +365,7 @@ func TestRetroTrigger_MissingSessionReturns404(t *testing.T) {
 func TestRetroTrigger_LockReleasedAfterCompletion(t *testing.T) {
 	srv, mr := newTestServer(t)
 
-	mr.RPush("session:lock-test:history", `{"role":"user","content":"hi"}`)
+	seedResponse(t, mr, "resp_lock1", "lock-test", "", "hi", "hey")
 
 	body := `{"job_type":"curation"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/retro/lock-test/trigger", strings.NewReader(body))
@@ -584,4 +585,238 @@ func TestStatus_MultipleAgents(t *testing.T) {
 	if len(result.Agents) != 3 {
 		t.Fatalf("expected 3 agents, got %d", len(result.Agents))
 	}
+}
+
+// --- Responses API Tests ---
+
+func TestGetResponse_Found(t *testing.T) {
+	srv, mr := newTestServer(t)
+
+	seedResponse(t, mr, "resp_GET1", "sess-get", "", "hello", "world")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses/resp_GET1", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result responsesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ID != "resp_GET1" {
+		t.Errorf("expected id resp_GET1, got %q", result.ID)
+	}
+	if result.Object != "response" {
+		t.Errorf("expected object 'response', got %q", result.Object)
+	}
+	if result.SessionID != "sess-get" {
+		t.Errorf("expected session sess-get, got %q", result.SessionID)
+	}
+	if result.Status != response.StatusCompleted {
+		t.Errorf("expected completed, got %q", result.Status)
+	}
+	if len(result.Output) != 1 {
+		t.Fatalf("expected 1 output item, got %d", len(result.Output))
+	}
+	if result.Output[0].Content[0].Text != "world" {
+		t.Errorf("expected output text 'world', got %q", result.Output[0].Content[0].Text)
+	}
+}
+
+func TestGetResponse_NotFound(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses/resp_MISSING", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestCreateResponse_InvalidInput(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	body := `{"input":123,"model":"test"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateResponse_EmptyInput(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	body := `{"input":[],"model":"test"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateResponse_BrokenChain(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	body := `{"input":"hello","model":"test","previous_response_id":"resp_DOESNOTEXIST"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestParseInput_String(t *testing.T) {
+	items, err := parseInput("hello world")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Role != "user" {
+		t.Errorf("expected role user, got %q", items[0].Role)
+	}
+	if items[0].Content != "hello world" {
+		t.Errorf("expected content 'hello world', got %v", items[0].Content)
+	}
+}
+
+func TestParseInput_Array(t *testing.T) {
+	input := []any{
+		map[string]any{"type": "message", "role": "user", "content": "hi"},
+		map[string]any{"type": "message", "role": "assistant", "content": "hey"},
+	}
+	items, err := parseInput(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+}
+
+func TestChainToMessages(t *testing.T) {
+	chain := []*response.Response{
+		{
+			Input:  []response.InputItem{{Type: "message", Role: "user", Content: "first"}},
+			Output: []response.OutputItem{{Type: "message", Role: "assistant", Content: []response.ContentPart{{Type: "output_text", Text: "reply1"}}}},
+		},
+		{
+			Input:  []response.InputItem{{Type: "message", Role: "user", Content: "second"}},
+			Output: []response.OutputItem{{Type: "message", Role: "assistant", Content: []response.ContentPart{{Type: "output_text", Text: "reply2"}}}},
+		},
+	}
+
+	msgs := chainToMessages(chain)
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(msgs))
+	}
+	if msgs[0].Content != "first" || msgs[1].Content != "reply1" || msgs[2].Content != "second" || msgs[3].Content != "reply2" {
+		t.Errorf("message content mismatch: %v", msgs)
+	}
+}
+
+func TestTextToOutputItems(t *testing.T) {
+	items := textToOutputItems("hello world")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Type != "message" || items[0].Role != "assistant" {
+		t.Errorf("unexpected item type/role: %+v", items[0])
+	}
+	if len(items[0].Content) != 1 || items[0].Content[0].Text != "hello world" {
+		t.Errorf("expected text 'hello world', got %+v", items[0].Content)
+	}
+}
+
+func TestSessionReconstructionFromResponseChain(t *testing.T) {
+	srv, mr := newTestServer(t)
+
+	seedResponse(t, mr, "resp_chain1", "sess-recon", "", "first msg", "first reply")
+	seedResponse(t, mr, "resp_chain2", "sess-recon", "resp_chain1", "second msg", "second reply")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/sess-recon", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, ok := result["messages"].([]any)
+	if !ok {
+		t.Fatal("expected messages array")
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages (2 user + 2 assistant), got %d", len(msgs))
+	}
+}
+
+func TestDeleteSession_RemovesResponseHashes(t *testing.T) {
+	srv, mr := newTestServer(t)
+
+	seedResponse(t, mr, "resp_dh1", "sess-dh", "", "hi", "hey")
+	seedResponse(t, mr, "resp_dh2", "sess-dh", "resp_dh1", "bye", "cya")
+
+	if !mr.Exists("response:resp_dh1") || !mr.Exists("response:resp_dh2") {
+		t.Fatal("responses should exist before delete")
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/sess-dh", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	if mr.Exists("response:resp_dh1") {
+		t.Error("resp_dh1 should be deleted")
+	}
+	if mr.Exists("response:resp_dh2") {
+		t.Error("resp_dh2 should be deleted")
+	}
+	if mr.Exists("session:sess-dh:responses") {
+		t.Error("session response list should be deleted")
+	}
+}
+
+func seedResponse(t *testing.T, mr *miniredis.Miniredis, respID, sessionID, prevRespID, userContent, assistantContent string) {
+	t.Helper()
+	inputJSON, _ := json.Marshal([]response.InputItem{{Type: "message", Role: "user", Content: userContent}})
+	outputJSON, _ := json.Marshal([]response.OutputItem{{
+		Type: "message",
+		Role: "assistant",
+		Content: []response.ContentPart{{Type: "output_text", Text: assistantContent}},
+	}})
+	key := "response:" + respID
+	mr.HSet(key, "id", respID)
+	mr.HSet(key, "input", string(inputJSON))
+	mr.HSet(key, "output", string(outputJSON))
+	mr.HSet(key, "previous_response_id", prevRespID)
+	mr.HSet(key, "session_id", sessionID)
+	mr.HSet(key, "model", "test")
+	mr.HSet(key, "created_at", "2025-01-01T00:00:00Z")
+	mr.HSet(key, "status", "completed")
+	mr.RPush("session:"+sessionID+":responses", respID)
 }

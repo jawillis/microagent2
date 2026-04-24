@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"microagent2/internal/messaging"
+	"microagent2/internal/response"
 )
 
 type Manager struct {
 	client       *messaging.Client
-	sessions     *SessionStore
+	responses    *response.Store
 	muninn       *MuninnClient
 	assembler    *Assembler
 	logger       *slog.Logger
@@ -19,10 +20,10 @@ type Manager struct {
 	prewarmLimit int
 }
 
-func NewManager(client *messaging.Client, sessions *SessionStore, muninn *MuninnClient, assembler *Assembler, logger *slog.Logger, recallLimit, prewarmLimit int) *Manager {
+func NewManager(client *messaging.Client, responses *response.Store, muninn *MuninnClient, assembler *Assembler, logger *slog.Logger, recallLimit, prewarmLimit int) *Manager {
 	return &Manager{
 		client:       client,
-		sessions:     sessions,
+		responses:    responses,
 		muninn:       muninn,
 		assembler:    assembler,
 		logger:       logger,
@@ -80,7 +81,7 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	memCh := make(chan memoryResult, 1)
 
 	go func() {
-		h, err := m.sessions.GetHistory(ctx, payload.SessionID)
+		h, err := m.getSessionHistory(ctx, payload.SessionID)
 		histCh <- historyResult{h, err}
 	}()
 
@@ -100,10 +101,6 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	}
 
 	assembled := m.assembler.Assemble(mr.memories, hr.history, userMsg)
-
-	if err := m.sessions.Append(ctx, payload.SessionID, userMsg); err != nil {
-		m.logger.Error("failed to append user message to history", "error", err)
-	}
 
 	agentStream := fmt.Sprintf(messaging.StreamAgentRequests, "main-agent")
 	replyStream := msg.ReplyStream
@@ -127,8 +124,12 @@ func (m *Manager) handleRequest(ctx context.Context, msg *messaging.Message) {
 	go m.preWarmMemories(ctx, payload.SessionID)
 }
 
+func (m *Manager) getSessionHistory(ctx context.Context, sessionID string) ([]messaging.ChatMsg, error) {
+	return m.responses.GetSessionMessages(ctx, sessionID)
+}
+
 func (m *Manager) preWarmMemories(ctx context.Context, sessionID string) {
-	history, err := m.sessions.GetHistory(ctx, sessionID)
+	history, err := m.getSessionHistory(ctx, sessionID)
 	if err != nil || len(history) == 0 {
 		return
 	}
@@ -148,11 +149,4 @@ func (m *Manager) preWarmMemories(ctx context.Context, sessionID string) {
 	if err != nil {
 		m.logger.Debug("pre-warm memory fetch failed", "error", err)
 	}
-}
-
-func (m *Manager) AppendAssistantResponse(ctx context.Context, sessionID, content string) error {
-	return m.sessions.Append(ctx, sessionID, messaging.ChatMsg{
-		Role:    "assistant",
-		Content: content,
-	})
 }
