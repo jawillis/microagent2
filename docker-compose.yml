@@ -235,7 +235,10 @@ services:
     ports:
       - "${OPEN_WEBUI_PORT:-3000}:8080"
     environment:
-      - OPENAI_API_BASE_URL=http://mitmweb:8080/v1
+      # Default: direct to gateway for real SSE streaming.
+      # Debug: set OPENAI_API_BASE_URL=http://mitmweb:8080/v1 in .env and
+      # bring up the mitmweb service via `docker compose --profile debug up -d mitmweb`.
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-http://gateway:8080/v1}
       - OPENAI_API_KEY=none
       - USE_OLLAMA_DOCKER=false
       - ANONYMIZED_TELEMETRY=false
@@ -247,14 +250,22 @@ services:
     networks:
       - microagent
 
+  # mitmweb is opt-in. It's useful for inspecting gateway SSE traffic but
+  # buffers response bodies by default, which breaks token-by-token streaming
+  # to the UI. Not started by `docker compose up`. To enable for debugging:
+  #   docker compose --profile debug up -d mitmweb
+  # Point open-webui at it via OPENAI_API_BASE_URL=http://mitmweb:8080/v1 in
+  # .env, then recreate open-webui. The --set stream_large_bodies=1 flag
+  # forces streaming so SSE flows through.
   mitmweb:
     image: mitmproxy/mitmproxy
     container_name: mitmweb
     restart: unless-stopped
+    profiles: ["debug"]
     ports:
       - "8082:8080"
       - "8083:8081"
-    command: mitmweb --web-host 0.0.0.0 --set web_password=nerdtastic --mode reverse:http://gateway:8080
+    command: mitmweb --web-host 0.0.0.0 --set web_password=nerdtastic --set stream_large_bodies=1 --mode reverse:http://gateway:8080
     networks:
       - microagent
 
