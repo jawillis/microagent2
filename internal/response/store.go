@@ -57,11 +57,28 @@ type Response struct {
 }
 
 type Store struct {
-	rdb *redis.Client
+	rdb             *redis.Client
+	sessionHashTTL time.Duration
 }
 
+const defaultSessionHashTTL = 24 * time.Hour
+
 func NewStore(rdb *redis.Client) *Store {
-	return &Store{rdb: rdb}
+	return &Store{rdb: rdb, sessionHashTTL: defaultSessionHashTTL}
+}
+
+// NewStoreWithSessionHashTTL is like NewStore but lets the caller override
+// the TTL applied to session_hash:* index entries. A non-positive value
+// falls back to the default.
+func NewStoreWithSessionHashTTL(rdb *redis.Client, ttl time.Duration) *Store {
+	if ttl <= 0 {
+		ttl = defaultSessionHashTTL
+	}
+	return &Store{rdb: rdb, sessionHashTTL: ttl}
+}
+
+func sessionHashKey(hashHex string) string {
+	return fmt.Sprintf("session_hash:%s", hashHex)
 }
 
 func NewResponseID() string {
@@ -78,6 +95,35 @@ func responseKey(id string) string {
 
 func sessionResponsesKey(sessionID string) string {
 	return fmt.Sprintf("session:%s:responses", sessionID)
+}
+
+// StoreSessionPrefixHash records that a given conversation hash maps to a
+// session id. The write expires after the store's configured TTL.
+func (s *Store) StoreSessionPrefixHash(ctx context.Context, hashHex, sessionID string) error {
+	return s.rdb.Set(ctx, sessionHashKey(hashHex), sessionID, s.sessionHashTTL).Err()
+}
+
+// LookupSessionByPrefixHash returns the session id recorded for a given
+// conversation hash. ok=false (with nil error) means the hash is not indexed.
+func (s *Store) LookupSessionByPrefixHash(ctx context.Context, hashHex string) (string, bool, error) {
+	sid, err := s.rdb.Get(ctx, sessionHashKey(hashHex)).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return sid, true, nil
+}
+
+// GetLastResponseID returns the most recent response id in a session, or
+// "" (with nil error) if the session has no responses.
+func (s *Store) GetLastResponseID(ctx context.Context, sessionID string) (string, error) {
+	id, err := s.rdb.LIndex(ctx, sessionResponsesKey(sessionID), -1).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return id, err
 }
 
 func (s *Store) Save(ctx context.Context, resp *Response) error {

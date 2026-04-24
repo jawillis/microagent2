@@ -3,6 +3,7 @@ package response
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -265,5 +266,76 @@ func TestSessionExists(t *testing.T) {
 	exists, _ = store.SessionExists(ctx, "sess-ex")
 	if !exists {
 		t.Error("expected true for existing session")
+	}
+}
+
+func TestStoreSessionPrefixHashRoundTrip(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+
+	sid, ok, err := store.LookupSessionByPrefixHash(ctx, "deadbeef")
+	if err != nil || ok || sid != "" {
+		t.Fatalf("empty lookup: sid=%q ok=%v err=%v", sid, ok, err)
+	}
+
+	if err := store.StoreSessionPrefixHash(ctx, "deadbeef", "sess-A"); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	got, ok, err := store.LookupSessionByPrefixHash(ctx, "deadbeef")
+	if err != nil || !ok || got != "sess-A" {
+		t.Fatalf("after write: got=%q ok=%v err=%v", got, ok, err)
+	}
+
+	// TTL is set via SET EX; miniredis exposes a way to fast-forward time.
+	mr.FastForward(25 * time.Hour)
+	got, ok, err = store.LookupSessionByPrefixHash(ctx, "deadbeef")
+	if err != nil || ok || got != "" {
+		t.Fatalf("after TTL expiry: got=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestStoreSessionPrefixHashCustomTTL(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mr.Close)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { rdb.Close() })
+
+	store := NewStoreWithSessionHashTTL(rdb, time.Hour)
+	ctx := context.Background()
+	if err := store.StoreSessionPrefixHash(ctx, "abc", "s"); err != nil {
+		t.Fatal(err)
+	}
+	mr.FastForward(30 * time.Minute)
+	if _, ok, _ := store.LookupSessionByPrefixHash(ctx, "abc"); !ok {
+		t.Fatal("should still be present at 30 min with 1h TTL")
+	}
+	mr.FastForward(31 * time.Minute)
+	if _, ok, _ := store.LookupSessionByPrefixHash(ctx, "abc"); ok {
+		t.Fatal("should be expired past 1h TTL")
+	}
+}
+
+func TestGetLastResponseID(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.GetLastResponseID(ctx, "no-such-session")
+	if err != nil || id != "" {
+		t.Fatalf("missing session: id=%q err=%v", id, err)
+	}
+
+	for _, rid := range []string{"r1", "r2", "r3"} {
+		r := &Response{ID: rid, SessionID: "s1", Status: StatusCompleted}
+		if err := store.Save(ctx, r); err != nil {
+			t.Fatalf("save %s: %v", rid, err)
+		}
+	}
+
+	id, err = store.GetLastResponseID(ctx, "s1")
+	if err != nil || id != "r3" {
+		t.Fatalf("last: id=%q err=%v", id, err)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"microagent2/internal/messaging"
@@ -50,25 +49,26 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var sessionID string
+	shouldStore := req.Store == nil || *req.Store
+
+	decision, derr := s.decideSession(r.Context(), req.PreviousResponseID, shouldStore, inputItems)
+	if derr != nil {
+		writeError(w, derr.status, derr.code, derr.msg)
+		return
+	}
+	sessionID := decision.SessionID
+	effectivePrevRespID := decision.EffectivePrevRespID
+	stitchPrefixHash := decision.StitchPrefixHash
+	stitched := decision.Stitched
+
 	var historyMsgs []messaging.ChatMsg
-
 	if req.PreviousResponseID != "" {
-		sid, err := s.responses.InheritSessionID(r.Context(), req.PreviousResponseID)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("previous_response_id not found: %s", req.PreviousResponseID))
-			return
-		}
-		sessionID = sid
-
 		chain, err := s.responses.WalkChain(r.Context(), req.PreviousResponseID)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("failed to resolve response chain: %s", err.Error()))
 			return
 		}
 		historyMsgs = chainToMessages(chain)
-	} else {
-		sessionID = response.NewSessionID()
 	}
 
 	currentMsgs := inputItemsToMessages(inputItems)
@@ -77,6 +77,19 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	responseID := response.NewResponseID()
 	correlationID := messaging.NewCorrelationID()
 	replyStream := fmt.Sprintf("stream:gateway:reply:%s", correlationID)
+	if stitchPrefixHash != "" {
+		outcome := "minted"
+		if stitched {
+			outcome = "matched"
+		}
+		s.logger.Info("stitch_decision",
+			"correlation_id", correlationID,
+			"session_id", sessionID,
+			"prefix_hash", stitchPrefixHash[:8],
+			"outcome", outcome,
+			"previous_response_id", effectivePrevRespID,
+		)
+	}
 
 	msg, err := messaging.NewMessage(messaging.TypeChatRequest, "gateway", messaging.ChatRequestPayload{
 		SessionID: sessionID,
@@ -112,12 +125,10 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("X-Session-ID", sessionID)
 
-	shouldStore := req.Store == nil || *req.Store
-
 	if req.Stream {
-		s.handleResponsesStreaming(r.Context(), w, responseID, sessionID, correlationID, req.Model, req.PreviousResponseID, inputItems, shouldStore, publishStart)
+		s.handleResponsesStreaming(r.Context(), w, responseID, sessionID, correlationID, req.Model, effectivePrevRespID, inputItems, shouldStore, publishStart)
 	} else {
-		s.handleResponsesNonStreaming(r.Context(), w, replyStream, responseID, sessionID, correlationID, req.Model, req.PreviousResponseID, inputItems, shouldStore, publishStart)
+		s.handleResponsesNonStreaming(r.Context(), w, replyStream, responseID, sessionID, correlationID, req.Model, effectivePrevRespID, inputItems, shouldStore, publishStart)
 	}
 }
 
@@ -150,6 +161,8 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 		}
 		if err := s.responses.Save(ctx, resp); err != nil {
 			s.logger.Error("failed to store response", "error", err, "response_id", responseID)
+		} else {
+			s.writeStitchIndex(ctx, sessionID, correlationID, inputItems, outputItems)
 		}
 	}
 
@@ -251,6 +264,8 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 					}
 					if err := s.responses.Save(ctx, resp); err != nil {
 						s.logger.Error("failed to store response", "error", err, "response_id", responseID)
+					} else {
+						s.writeStitchIndex(ctx, sessionID, correlationID, inputItems, outputItems)
 					}
 				}
 
@@ -340,6 +355,90 @@ func parseInput(raw any) ([]response.InputItem, error) {
 	}
 }
 
+// sessionDecision is the result of picking a session_id (and the
+// previous_response_id the new response will carry) for an incoming
+// /v1/responses call. Produced by decideSession; consumed by the
+// two request handlers.
+type sessionDecision struct {
+	SessionID           string
+	EffectivePrevRespID string
+	StitchPrefixHash    string // set only when stitching was attempted
+	Stitched            bool   // true if the hash index hit
+}
+
+type handlerErr struct {
+	status int
+	code   string
+	msg    string
+}
+
+// decideSession picks the session_id and previous_response_id for this turn.
+//
+//  1. req.PreviousResponseID set -> inherit session from that response.
+//  2. PreviousResponseID empty, store=true, len(inputItems) > 1 ->
+//     client-side-state replay. Try to stitch via hash of inputItems[:-1].
+//  3. Else -> mint a fresh session_id.
+func (s *Server) decideSession(ctx context.Context, prevRespID string, shouldStore bool, inputItems []response.InputItem) (sessionDecision, *handlerErr) {
+	if prevRespID != "" {
+		sid, err := s.responses.InheritSessionID(ctx, prevRespID)
+		if err != nil {
+			return sessionDecision{}, &handlerErr{
+				status: http.StatusBadRequest,
+				code:   "invalid_request",
+				msg:    fmt.Sprintf("previous_response_id not found: %s", prevRespID),
+			}
+		}
+		return sessionDecision{SessionID: sid, EffectivePrevRespID: prevRespID}, nil
+	}
+
+	if shouldStore && len(inputItems) > 1 {
+		hashHex := response.StitchHash(inputItems[:len(inputItems)-1])
+		sid, ok, err := s.responses.LookupSessionByPrefixHash(ctx, hashHex)
+		if err != nil {
+			s.logger.Warn("stitch_lookup_failed", "error", err.Error(), "prefix_hash", hashHex[:8])
+			return sessionDecision{SessionID: response.NewSessionID(), StitchPrefixHash: hashHex}, nil
+		}
+		if ok {
+			prev, _ := s.responses.GetLastResponseID(ctx, sid)
+			return sessionDecision{
+				SessionID:           sid,
+				EffectivePrevRespID: prev,
+				StitchPrefixHash:    hashHex,
+				Stitched:            true,
+			}, nil
+		}
+		return sessionDecision{SessionID: response.NewSessionID(), StitchPrefixHash: hashHex}, nil
+	}
+
+	return sessionDecision{SessionID: response.NewSessionID()}, nil
+}
+
+// writeStitchIndex stores the canonical hash of the full turn
+// (inputItems + the assistant outputItems) as an index entry pointing
+// at sessionID, so the next client-side-state replay can stitch back to
+// the same session. Failure is logged but non-fatal.
+func (s *Server) writeStitchIndex(ctx context.Context, sessionID, correlationID string, inputItems []response.InputItem, outputItems []response.OutputItem) {
+	full := make([]response.InputItem, 0, len(inputItems)+len(outputItems))
+	full = append(full, inputItems...)
+	for _, out := range outputItems {
+		full = append(full, response.OutputItemToInputItem(out))
+	}
+	hashHex := response.StitchHash(full)
+	if err := s.responses.StoreSessionPrefixHash(ctx, hashHex, sessionID); err != nil {
+		s.logger.Warn("stitch_index_write_failed",
+			"correlation_id", correlationID,
+			"session_id", sessionID,
+			"error", err.Error(),
+		)
+		return
+	}
+	s.logger.Info("stitch_index_wrote",
+		"correlation_id", correlationID,
+		"session_id", sessionID,
+		"prefix_hash", hashHex[:8],
+	)
+}
+
 func inputItemsToMessages(items []response.InputItem) []messaging.ChatMsg {
 	var msgs []messaging.ChatMsg
 	for _, item := range items {
@@ -347,42 +446,9 @@ func inputItemsToMessages(items []response.InputItem) []messaging.ChatMsg {
 		if role == "" {
 			role = "user"
 		}
-		msgs = append(msgs, messaging.ChatMsg{Role: role, Content: flattenContent(item.Content)})
+		msgs = append(msgs, messaging.ChatMsg{Role: role, Content: response.FlattenContent(item.Content)})
 	}
 	return msgs
-}
-
-// flattenContent reduces the OpenAI Responses API content field to plain text.
-// The field can be a bare string, or an array of content parts of the form
-// [{"type":"input_text","text":"..."}, ...] / [{"type":"output_text","text":"..."}].
-// We concatenate the text from each part with a single space.
-func flattenContent(raw any) string {
-	switch c := raw.(type) {
-	case string:
-		return c
-	case []any:
-		var b strings.Builder
-		for _, p := range c {
-			m, ok := p.(map[string]any)
-			if !ok {
-				continue
-			}
-			t, _ := m["type"].(string)
-			if t != "" && t != "input_text" && t != "output_text" && t != "text" {
-				continue
-			}
-			text, _ := m["text"].(string)
-			if text == "" {
-				continue
-			}
-			if b.Len() > 0 {
-				b.WriteByte(' ')
-			}
-			b.WriteString(text)
-		}
-		return b.String()
-	}
-	return ""
 }
 
 func chainToMessages(chain []*response.Response) []messaging.ChatMsg {

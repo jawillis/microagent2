@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"microagent2/internal/config"
 	"microagent2/internal/gateway"
@@ -37,7 +39,8 @@ func main() {
 	chatCfg := config.ResolveChat(ctx, cfgStore)
 	logger.Info("config resolved", "model", chatCfg.Model, "request_timeout_s", chatCfg.RequestTimeoutS)
 
-	responses := response.NewStore(client.Redis())
+	sessionHashTTL := time.Duration(envInt("SESSION_HASH_TTL_HOURS", 24)) * time.Hour
+	responses := response.NewStoreWithSessionHashTTL(client.Redis(), sessionHashTTL)
 	srv := gateway.New(client, logger, cfgStore, responses, chatCfg.RequestTimeoutS, port, llamaAddr, muninnAddr)
 
 	httpServer := &http.Server{
@@ -64,6 +67,15 @@ func main() {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }

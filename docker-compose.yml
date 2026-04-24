@@ -25,6 +25,7 @@ services:
       - GATEWAY_PORT=8080
       - LLAMA_ADDR=http://${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
       - MUNINNDB_ADDR=http://${MUNINNDB_ADDR:-host.docker.internal:8100}
+      - SESSION_HASH_TTL_HOURS=${SESSION_HASH_TTL_HOURS:-24}
     depends_on:
       valkey:
         condition: service_healthy
