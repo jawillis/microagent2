@@ -40,9 +40,14 @@ type slotRequest struct {
 	priority      int
 	correlationID string
 	replyStream   string
+	class         SlotClass
 }
 
 func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr, llamaAPIKey, model string, slotCount int, preemptTimeout, provisionalTimeout, snapshotInterval time.Duration) *Broker {
+	return NewWithClasses(client, reg, logger, llamaAddr, llamaAPIKey, model, slotCount, 0, preemptTimeout, provisionalTimeout, snapshotInterval)
+}
+
+func NewWithClasses(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, llamaAddr, llamaAPIKey, model string, agentSlotCount, hindsightSlotCount int, preemptTimeout, provisionalTimeout, snapshotInterval time.Duration) *Broker {
 	if provisionalTimeout <= 0 {
 		provisionalTimeout = 2 * time.Second
 	}
@@ -51,7 +56,7 @@ func New(client *messaging.Client, reg *registry.Registry, logger *slog.Logger, 
 	}
 	b := &Broker{
 		client:             client,
-		slots:              NewSlotTable(slotCount),
+		slots:              NewSlotTableWithClasses(agentSlotCount, hindsightSlotCount),
 		registry:           reg,
 		logger:             logger,
 		llamaAddr:          llamaAddr,
@@ -128,40 +133,47 @@ func (b *Broker) handleMessage(ctx context.Context, msg *messaging.Message) {
 }
 
 func (b *Broker) handleSlotRequest(ctx context.Context, msg *messaging.Message, payload messaging.SlotRequestPayload) {
-	slotID, found := b.slots.FindUnassigned()
+	class, ok := NormalizeClass(payload.SlotClass)
+	if !ok {
+		b.logger.Warn("unknown_slot_class", "slot_class", payload.SlotClass, "agent", payload.AgentID, "correlation_id", msg.CorrelationID)
+		return
+	}
+
+	slotID, found := b.slots.FindUnassigned(class)
 	if found {
 		if !b.slots.AssignProvisional(slotID, payload.AgentID, payload.Priority, msg.CorrelationID) {
 			b.logger.Warn("slot_assign_collision", "slot", slotID, "agent", payload.AgentID)
 			// race: slot taken between find and assign; re-enqueue
-			b.enqueue(msg, payload)
+			b.enqueue(msg, payload, class)
 			return
 		}
-		b.logger.Info("slot_assigned_provisional", "slot", slotID, "agent", payload.AgentID, "correlation_id", msg.CorrelationID)
+		b.logger.Info("slot_assigned_provisional", "slot", slotID, "class", class, "agent", payload.AgentID, "correlation_id", msg.CorrelationID)
 		b.sendSlotAssigned(ctx, msg, slotID, payload.AgentID)
 		b.scheduleReclaim(msg.CorrelationID)
 		return
 	}
 
-	victimSlot, victimAgent, victimPriority, hasVictim := b.slots.FindLowestPriorityPreemptible(b)
+	victimSlot, victimAgent, victimPriority, hasVictim := b.slots.FindLowestPriorityPreemptible(class, b)
 	if hasVictim && payload.Priority < victimPriority {
-		b.logger.Info("preempting agent", "victim", victimAgent, "slot", victimSlot, "requester", payload.AgentID)
+		b.logger.Info("preempting agent", "victim", victimAgent, "slot", victimSlot, "class", class, "requester", payload.AgentID)
 		b.preemptAgent(ctx, victimAgent, victimSlot, msg, payload)
 		return
 	}
 
-	b.enqueue(msg, payload)
+	b.enqueue(msg, payload, class)
 }
 
-func (b *Broker) enqueue(msg *messaging.Message, payload messaging.SlotRequestPayload) {
+func (b *Broker) enqueue(msg *messaging.Message, payload messaging.SlotRequestPayload, class SlotClass) {
 	b.mu.Lock()
 	b.pendingQueue = append(b.pendingQueue, slotRequest{
 		agentID:       payload.AgentID,
 		priority:      payload.Priority,
 		correlationID: msg.CorrelationID,
 		replyStream:   msg.ReplyStream,
+		class:         class,
 	})
 	b.mu.Unlock()
-	b.logger.Info("slot request queued", "agent", payload.AgentID, "correlation_id", msg.CorrelationID)
+	b.logger.Info("slot request queued", "agent", payload.AgentID, "class", class, "correlation_id", msg.CorrelationID)
 }
 
 func (b *Broker) scheduleReclaim(correlationID string) {
@@ -252,18 +264,24 @@ func (b *Broker) assignFromQueue(ctx context.Context) {
 		return
 	}
 
-	slotID, found := b.slots.FindUnassigned()
-	if !found {
+	// Find the best (lowest priority value) queued request that has a free slot of its class.
+	bestIdx := -1
+	var chosenSlot int
+	for i, req := range b.pendingQueue {
+		sid, found := b.slots.FindUnassigned(req.class)
+		if !found {
+			continue
+		}
+		if bestIdx == -1 || req.priority < b.pendingQueue[bestIdx].priority {
+			bestIdx = i
+			chosenSlot = sid
+		}
+	}
+	if bestIdx == -1 {
 		b.mu.Unlock()
 		return
 	}
-
-	bestIdx := 0
-	for i, req := range b.pendingQueue {
-		if req.priority < b.pendingQueue[bestIdx].priority {
-			bestIdx = i
-		}
-	}
+	slotID := chosenSlot
 
 	req := b.pendingQueue[bestIdx]
 	b.pendingQueue = append(b.pendingQueue[:bestIdx], b.pendingQueue[bestIdx+1:]...)
@@ -318,14 +336,28 @@ func (b *Broker) handleLLMRequest(ctx context.Context, msg *messaging.Message) {
 		return
 	}
 
+	requestedClass, ok := NormalizeClass(payload.SlotClass)
+	if !ok {
+		b.logger.Warn("unknown_slot_class", "slot_class", payload.SlotClass, "agent", msg.Source, "correlation_id", msg.CorrelationID)
+		b.sendDoneOnReply(ctx, msg)
+		return
+	}
+	slotClass := b.slots.ClassOf(payload.SlotID)
+	if slotClass != requestedClass {
+		b.logger.Warn("llm_request_class_mismatch",
+			"slot_id", payload.SlotID,
+			"slot_class_expected", slotClass,
+			"slot_class_requested", requestedClass,
+			"agent_id", msg.Source,
+			"correlation_id", msg.CorrelationID,
+		)
+		b.sendDoneOnReply(ctx, msg)
+		return
+	}
+
 	if !b.slots.IsOwnedBy(payload.SlotID, msg.Source) {
 		b.logger.Error("llm_request_slot_not_owned", "slot", payload.SlotID, "agent", msg.Source, "correlation_id", msg.CorrelationID)
-		if msg.ReplyStream != "" {
-			doneMsg, err := messaging.NewReply(msg, messaging.TypeToken, "llm-broker", messaging.TokenPayload{Done: true})
-			if err == nil {
-				_, _ = b.client.Publish(ctx, msg.ReplyStream, doneMsg)
-			}
-		}
+		b.sendDoneOnReply(ctx, msg)
 		return
 	}
 
@@ -391,6 +423,17 @@ func (b *Broker) handleLLMRequest(ctx context.Context, msg *messaging.Message) {
 	if err == nil {
 		_, _ = b.client.Publish(ctx, replyStream, doneMsg)
 	}
+}
+
+func (b *Broker) sendDoneOnReply(ctx context.Context, msg *messaging.Message) {
+	if msg.ReplyStream == "" {
+		return
+	}
+	doneMsg, err := messaging.NewReply(msg, messaging.TypeToken, "llm-broker", messaging.TokenPayload{Done: true})
+	if err != nil {
+		return
+	}
+	_, _ = b.client.Publish(ctx, msg.ReplyStream, doneMsg)
 }
 
 func (b *Broker) handleDeadAgent(agentID string) {

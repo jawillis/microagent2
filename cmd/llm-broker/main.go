@@ -42,7 +42,18 @@ func main() {
 	preemptTimeout := time.Duration(brokerCfg.PreemptTimeoutMS) * time.Millisecond
 	provisionalTimeout := time.Duration(envInt("PROVISIONAL_TIMEOUT_MS", 2000)) * time.Millisecond
 	snapshotInterval := time.Duration(envInt("SLOT_SNAPSHOT_INTERVAL_S", 30)) * time.Second
-	b := broker.New(client, reg, logger, llamaAddr, llamaAPIKey, chatCfg.Model, brokerCfg.SlotCount, preemptTimeout, provisionalTimeout, snapshotInterval)
+
+	agentSlotCount := envInt("AGENT_SLOT_COUNT", brokerCfg.SlotCount)
+	hindsightSlotCount := envInt("HINDSIGHT_SLOT_COUNT", 0)
+	if agentSlotCount+hindsightSlotCount > brokerCfg.SlotCount {
+		logger.Error("slot_class_budget_exceeds_total",
+			"agent_slot_count", agentSlotCount,
+			"hindsight_slot_count", hindsightSlotCount,
+			"total_slot_count", brokerCfg.SlotCount,
+		)
+		os.Exit(1)
+	}
+	b := broker.NewWithClasses(client, reg, logger, llamaAddr, llamaAPIKey, chatCfg.Model, agentSlotCount, hindsightSlotCount, preemptTimeout, provisionalTimeout, snapshotInterval)
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -52,7 +63,12 @@ func main() {
 		cancel()
 	}()
 
-	logger.Info("llm broker ready", "slots", brokerCfg.SlotCount, "llama_addr", llamaAddr)
+	logger.Info("llm broker ready",
+		"agent_slots", agentSlotCount,
+		"hindsight_slots", hindsightSlotCount,
+		"total_slots", agentSlotCount+hindsightSlotCount,
+		"llama_addr", llamaAddr,
+	)
 	if err := b.Run(ctx); err != nil && err != gocontext.Canceled {
 		logger.Error("broker error", "error", err)
 		os.Exit(1)

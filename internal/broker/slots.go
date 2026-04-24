@@ -26,8 +26,29 @@ func (s SlotState) String() string {
 	}
 }
 
+type SlotClass string
+
+const (
+	SlotClassAgent     SlotClass = "agent"
+	SlotClassHindsight SlotClass = "hindsight"
+)
+
+// NormalizeClass returns the canonical class value, defaulting empty to agent.
+// Returns false if the input is a non-empty unrecognized value.
+func NormalizeClass(s string) (SlotClass, bool) {
+	switch s {
+	case "", string(SlotClassAgent):
+		return SlotClassAgent, true
+	case string(SlotClassHindsight):
+		return SlotClassHindsight, true
+	default:
+		return "", false
+	}
+}
+
 type SlotEntry struct {
 	SlotID        int
+	Class         SlotClass
 	State         SlotState
 	AgentID       string
 	Priority      int
@@ -36,11 +57,12 @@ type SlotEntry struct {
 }
 
 type SlotSnapshotEntry struct {
-	SlotID   int       `json:"slot"`
-	State    string    `json:"state"`
-	AgentID  string    `json:"agent,omitempty"`
-	Priority int       `json:"priority"`
-	AgeS     float64   `json:"age_s"`
+	SlotID   int     `json:"slot"`
+	Class    string  `json:"class"`
+	State    string  `json:"state"`
+	AgentID  string  `json:"agent,omitempty"`
+	Priority int     `json:"priority"`
+	AgeS     float64 `json:"age_s"`
 }
 
 type SlotTable struct {
@@ -48,23 +70,54 @@ type SlotTable struct {
 	slots []SlotEntry
 }
 
+// NewSlotTable creates a table with `count` agent-class slots and zero
+// hindsight-class slots. Retained for backward compatibility with callers
+// that predate slot classes.
 func NewSlotTable(count int) *SlotTable {
-	slots := make([]SlotEntry, count)
-	for i := range slots {
-		slots[i] = SlotEntry{SlotID: i, State: SlotUnassigned}
+	return NewSlotTableWithClasses(count, 0)
+}
+
+// NewSlotTableWithClasses creates a table with agentCount agent-class slots
+// at indices [0, agentCount) followed by hindsightCount hindsight-class slots
+// at [agentCount, agentCount+hindsightCount). A slot's class never changes.
+func NewSlotTableWithClasses(agentCount, hindsightCount int) *SlotTable {
+	if agentCount < 0 {
+		agentCount = 0
+	}
+	if hindsightCount < 0 {
+		hindsightCount = 0
+	}
+	total := agentCount + hindsightCount
+	slots := make([]SlotEntry, total)
+	for i := 0; i < agentCount; i++ {
+		slots[i] = SlotEntry{SlotID: i, Class: SlotClassAgent, State: SlotUnassigned}
+	}
+	for i := agentCount; i < total; i++ {
+		slots[i] = SlotEntry{SlotID: i, Class: SlotClassHindsight, State: SlotUnassigned}
 	}
 	return &SlotTable{slots: slots}
 }
 
-func (st *SlotTable) FindUnassigned() (int, bool) {
+func (st *SlotTable) FindUnassigned(class SlotClass) (int, bool) {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 	for _, s := range st.slots {
-		if s.State == SlotUnassigned {
+		if s.Class == class && s.State == SlotUnassigned {
 			return s.SlotID, true
 		}
 	}
 	return -1, false
+}
+
+// ClassOf returns the class of the slot at the given index, or empty if
+// the index is out of range.
+func (st *SlotTable) ClassOf(slotID int) SlotClass {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	if slotID < 0 || slotID >= len(st.slots) {
+		return ""
+	}
+	return st.slots[slotID].Class
 }
 
 func (st *SlotTable) AssignProvisional(slotID int, agentID string, priority int, correlationID string) bool {
@@ -76,8 +129,10 @@ func (st *SlotTable) AssignProvisional(slotID int, agentID string, priority int,
 	if st.slots[slotID].State != SlotUnassigned {
 		return false
 	}
+	class := st.slots[slotID].Class
 	st.slots[slotID] = SlotEntry{
 		SlotID:        slotID,
+		Class:         class,
 		State:         SlotProvisional,
 		AgentID:       agentID,
 		Priority:      priority,
@@ -105,7 +160,7 @@ func (st *SlotTable) RevertProvisional(correlationID string) (int, bool) {
 	defer st.mu.Unlock()
 	for i, s := range st.slots {
 		if s.State == SlotProvisional && s.CorrelationID == correlationID {
-			st.slots[i] = SlotEntry{SlotID: s.SlotID, State: SlotUnassigned}
+			st.slots[i] = SlotEntry{SlotID: s.SlotID, Class: s.Class, State: SlotUnassigned}
 			return s.SlotID, true
 		}
 	}
@@ -121,8 +176,10 @@ func (st *SlotTable) Assign(slotID int, agentID string, priority int) bool {
 	if st.slots[slotID].State != SlotUnassigned {
 		return false
 	}
+	class := st.slots[slotID].Class
 	st.slots[slotID] = SlotEntry{
 		SlotID:     slotID,
+		Class:      class,
 		State:      SlotAssigned,
 		AgentID:    agentID,
 		Priority:   priority,
@@ -137,8 +194,10 @@ func (st *SlotTable) ForceAssign(slotID int, agentID string, priority int) {
 	if slotID >= len(st.slots) {
 		return
 	}
+	class := st.slots[slotID].Class
 	st.slots[slotID] = SlotEntry{
 		SlotID:     slotID,
+		Class:      class,
 		State:      SlotAssigned,
 		AgentID:    agentID,
 		Priority:   priority,
@@ -149,8 +208,9 @@ func (st *SlotTable) ForceAssign(slotID int, agentID string, priority int) {
 func (st *SlotTable) Release(slotID int) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if slotID < len(st.slots) {
-		st.slots[slotID] = SlotEntry{SlotID: slotID, State: SlotUnassigned}
+	if slotID >= 0 && slotID < len(st.slots) {
+		class := st.slots[slotID].Class
+		st.slots[slotID] = SlotEntry{SlotID: slotID, Class: class, State: SlotUnassigned}
 	}
 }
 
@@ -160,20 +220,25 @@ func (st *SlotTable) ReleaseByAgent(agentID string) []int {
 	var released []int
 	for i, s := range st.slots {
 		if s.AgentID == agentID {
-			st.slots[i] = SlotEntry{SlotID: i, State: SlotUnassigned}
+			st.slots[i] = SlotEntry{SlotID: i, Class: s.Class, State: SlotUnassigned}
 			released = append(released, i)
 		}
 	}
 	return released
 }
 
-func (st *SlotTable) FindLowestPriorityPreemptible(registry interface{ IsPreemptible(string) bool }) (int, string, int, bool) {
+// FindLowestPriorityPreemptible finds a preemptible slot within the given class.
+// Only slots of the matching class are considered — no cross-class preemption.
+func (st *SlotTable) FindLowestPriorityPreemptible(class SlotClass, registry interface{ IsPreemptible(string) bool }) (int, string, int, bool) {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 	bestSlot := -1
 	bestAgent := ""
 	bestPriority := -1
 	for _, s := range st.slots {
+		if s.Class != class {
+			continue
+		}
 		if s.State == SlotAssigned && registry.IsPreemptible(s.AgentID) {
 			if bestSlot == -1 || s.Priority > bestPriority {
 				bestSlot = s.SlotID
@@ -221,6 +286,7 @@ func (st *SlotTable) Snapshot() []SlotSnapshotEntry {
 	for i, s := range st.slots {
 		entry := SlotSnapshotEntry{
 			SlotID:   s.SlotID,
+			Class:    string(s.Class),
 			State:    s.State.String(),
 			Priority: s.Priority,
 		}

@@ -104,6 +104,57 @@ func TestToolResultPayloadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSlotRequestPayloadOmitsEmptyClass(t *testing.T) {
+	p := SlotRequestPayload{AgentID: "a", Priority: 1}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"agent_id":"a","priority":1}`
+	if got := string(data); got != want {
+		t.Fatalf("want %q got %q", want, got)
+	}
+}
+
+func TestSlotRequestPayloadEmitsClassWhenSet(t *testing.T) {
+	p := SlotRequestPayload{AgentID: "proxy", Priority: 0, SlotClass: "hindsight"}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"agent_id":"proxy","priority":0,"slot_class":"hindsight"}`
+	if got := string(data); got != want {
+		t.Fatalf("want %q got %q", want, got)
+	}
+}
+
+func TestSlotRequestPayloadRoundTripWithClass(t *testing.T) {
+	p := SlotRequestPayload{AgentID: "proxy", Priority: 0, SlotClass: "hindsight"}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back SlotRequestPayload
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back != p {
+		t.Fatalf("roundtrip mismatch: got %+v want %+v", back, p)
+	}
+}
+
+func TestLLMRequestPayloadEmitsClassWhenSet(t *testing.T) {
+	p := LLMRequestPayload{SlotID: 4, SlotClass: "hindsight", Messages: []ChatMsg{{Role: "user", Content: "hi"}}, Stream: false}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"slot_id":4,"slot_class":"hindsight","messages":[{"role":"user","content":"hi"}],"stream":false}`
+	if got := string(data); got != want {
+		t.Fatalf("want %q got %q", want, got)
+	}
+}
+
 func TestSlotAssignedAckRoundTrip(t *testing.T) {
 	msg, err := NewMessage(TypeSlotAssignedAck, "main-agent", SlotAssignedAckPayload{
 		AgentID: "main-agent",

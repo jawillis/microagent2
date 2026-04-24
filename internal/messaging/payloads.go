@@ -70,8 +70,9 @@ type TokenPayload struct {
 }
 
 type SlotRequestPayload struct {
-	AgentID  string `json:"agent_id"`
-	Priority int    `json:"priority"`
+	AgentID   string `json:"agent_id"`
+	Priority  int    `json:"priority"`
+	SlotClass string `json:"slot_class,omitempty"`
 }
 
 type SlotAssignedPayload struct {
@@ -119,6 +120,7 @@ type ContextAssembledPayload struct {
 
 type LLMRequestPayload struct {
 	SlotID     int          `json:"slot_id"`
+	SlotClass  string       `json:"slot_class,omitempty"`
 	Messages   []ChatMsg    `json:"messages"`
 	Stream     bool         `json:"stream"`
 	Tools      []ToolSchema `json:"tools,omitempty"`

@@ -55,13 +55,33 @@ services:
       - VALKEY_ADDR=valkey:6379
       - LLAMA_SERVER_ADDR=${LLAMA_SERVER_ADDR:-host.docker.internal:8081}
       - LLAMA_API_KEY=${LLAMA_API_KEY:-}
-      - SLOT_COUNT=${SLOT_COUNT:-4}
+      - SLOT_COUNT=${SLOT_COUNT:-6}
+      - AGENT_SLOT_COUNT=${AGENT_SLOT_COUNT:-4}
+      - HINDSIGHT_SLOT_COUNT=${HINDSIGHT_SLOT_COUNT:-2}
       - PREEMPT_TIMEOUT_MS=${PREEMPT_TIMEOUT_MS:-5000}
       - PROVISIONAL_TIMEOUT_MS=${PROVISIONAL_TIMEOUT_MS:-2000}
       - SLOT_SNAPSHOT_INTERVAL_S=${SLOT_SNAPSHOT_INTERVAL_S:-30}
     depends_on:
       valkey:
         condition: service_healthy
+    networks:
+      - microagent
+
+  llm-proxy:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.llm-proxy
+    environment:
+      - VALKEY_ADDR=valkey:6379
+      - LLM_PROXY_HTTP_ADDR=:8082
+      - LLM_PROXY_IDENTITY=${LLM_PROXY_IDENTITY:-llm-proxy}
+      - LLM_PROXY_SLOT_TIMEOUT_MS=${LLM_PROXY_SLOT_TIMEOUT_MS:-10000}
+      - LLM_PROXY_REQUEST_TIMEOUT_MS=${LLM_PROXY_REQUEST_TIMEOUT_MS:-300000}
+    depends_on:
+      valkey:
+        condition: service_healthy
+      llm-broker:
+        condition: service_started
     networks:
       - microagent
 
