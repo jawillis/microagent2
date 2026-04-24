@@ -149,9 +149,13 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 	outputItems := textToOutputItems(payload.Content)
 
 	if store {
+		// Store only the current turn's user input. The session's growing
+		// history lives in the session:X:responses list — storing the full
+		// replay on each response would duplicate prior turns on every read.
+		turnInput := currentTurnInput(inputItems)
 		resp := &response.Response{
 			ID:                 responseID,
-			Input:              inputItems,
+			Input:              turnInput,
 			Output:             outputItems,
 			PreviousResponseID: previousResponseID,
 			SessionID:          sessionID,
@@ -162,6 +166,8 @@ func (s *Server) handleResponsesNonStreaming(ctx context.Context, w http.Respons
 		if err := s.responses.Save(ctx, resp); err != nil {
 			s.logger.Error("failed to store response", "error", err, "response_id", responseID)
 		} else {
+			// The stitch index still hashes over the FULL replayed conversation
+			// — that's what the client will send on the next turn's prefix.
 			s.writeStitchIndex(ctx, sessionID, correlationID, inputItems, outputItems)
 		}
 	}
@@ -252,9 +258,10 @@ func (s *Server) handleResponsesStreaming(ctx context.Context, w http.ResponseWr
 				outputItems := textToOutputItems(fullContent)
 
 				if store {
+					turnInput := currentTurnInput(inputItems)
 					resp := &response.Response{
 						ID:                 responseID,
-						Input:              inputItems,
+						Input:              turnInput,
 						Output:             outputItems,
 						PreviousResponseID: previousResponseID,
 						SessionID:          sessionID,
@@ -411,6 +418,18 @@ func (s *Server) decideSession(ctx context.Context, prevRespID string, shouldSto
 	}
 
 	return sessionDecision{SessionID: response.NewSessionID()}, nil
+}
+
+// currentTurnInput returns the last item of inputItems as a single-element
+// slice — the new user turn for this request. We store only this on the
+// Response, since the session's growing history is reconstructed from
+// the session:X:responses list. Storing the full replay per response
+// would duplicate prior turns on every read (dashboard, retro, etc.).
+func currentTurnInput(inputItems []response.InputItem) []response.InputItem {
+	if len(inputItems) == 0 {
+		return nil
+	}
+	return inputItems[len(inputItems)-1:]
 }
 
 // writeStitchIndex stores the canonical hash of the full turn

@@ -275,26 +275,15 @@ func (s *Store) GetSessionMessages(ctx context.Context, sessionID string) ([]mes
 			if role == "" {
 				role = "user"
 			}
-			content := ""
-			switch c := item.Content.(type) {
-			case string:
-				content = c
-			default:
-				if c != nil {
-					data, _ := json.Marshal(c)
-					content = string(data)
-				}
+			content := FlattenContent(item.Content)
+			if content == "" {
+				continue
 			}
 			msgs = append(msgs, messaging.ChatMsg{Role: role, Content: content})
 		}
 		for _, out := range resp.Output {
 			if out.Type == "message" && out.Role == "assistant" {
-				var text string
-				for _, part := range out.Content {
-					if part.Type == "output_text" || part.Type == "text" {
-						text += part.Text
-					}
-				}
+				text := FlattenContent(out.Content)
 				if text != "" {
 					msgs = append(msgs, messaging.ChatMsg{Role: "assistant", Content: text})
 				}
