@@ -503,7 +503,11 @@
     var wrap = el("div", "section section-iframe");
     wrap.appendChild(el("h3", null, section.title));
     var frame = el("iframe");
-    frame.src = section.url;
+    var iframeURL = new URL(section.url);
+    if (iframeURL.hostname === "localhost" || iframeURL.hostname === "127.0.0.1") {
+      iframeURL.hostname = window.location.hostname;
+    }
+    frame.src = iframeURL.toString();
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
     frame.style.width = "100%";
     frame.style.height = section.height || "600px";
