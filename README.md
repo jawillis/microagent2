@@ -33,7 +33,7 @@ Eight Go services speak to each other over Valkey streams + HTTP. The user talks
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/<your-org>/microagent2.git
+git clone https://github.com/jawillis/microagent2.git
 cd microagent2
 cp .env.example .env
 # Edit .env: set LLAMA_SERVER_ADDR to your inference endpoint,
